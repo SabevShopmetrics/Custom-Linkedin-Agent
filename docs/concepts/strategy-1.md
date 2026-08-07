@@ -1,6 +1,6 @@
 # Концепция — Вариант „Единна система"
 
-**Основава се на:** [research-plan-3-strategies.md](research-plan-3-strategies.md) — Стратегия 1
+**Основава се на:** [research-plan-3-strategies.md](../research-plans/research-plan-3-strategies.md) — Стратегия 1
 **Цел на този документ:** обяснение на идеята без технически подробности, за представяне и решение.
 
 ---
