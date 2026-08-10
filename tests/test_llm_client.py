@@ -1,0 +1,145 @@
+"""
+Retry с нарастващо изчакване → fallback модел → грешка; поправящ retry за невалиден
+JSON → грешка. Никакви реални HTTP извиквания — requests.post е подменен изцяло.
+"""
+
+import requests
+
+import src.llm.client as client_module
+from src.errors import InvalidResponseError, ModelUnavailableError
+from src.llm.client import LLMClient
+from src.llm.roles import Role
+from src.llm.schema import PlanSchema
+from tests.conftest import content_response, make_config
+
+import pytest
+
+VALID_PLAN_JSON = (
+    '{"post_type": "практики", "format": "текст+снимка", "tone": "топло", '
+    '"needs_photos": true, "max_photo_count": 2, "is_sensitive": false, "notes": ""}'
+)
+
+
+def test_complete_success_on_first_try(monkeypatch):
+    calls = []
+
+    def fake_post(url, headers, json, timeout):
+        calls.append(json["model"])
+        return content_response("Здравей, свят")
+
+    monkeypatch.setattr(client_module.requests, "post", fake_post)
+    client = LLMClient(make_config(), sleep_fn=lambda s: None)
+
+    result = client.complete(Role.WRITER, "напиши нещо")
+
+    assert result == "Здравей, свят"
+    assert calls == ["writer-model"]
+    assert client.call_log[0].success is True
+    assert client.call_log[0].attempts == 1
+    assert client.call_log[0].used_fallback is False
+
+
+def test_complete_retries_on_transient_failure_then_succeeds(monkeypatch):
+    attempts = {"n": 0}
+
+    def fake_post(url, headers, json, timeout):
+        attempts["n"] += 1
+        if attempts["n"] < 3:
+            raise requests.exceptions.ConnectionError("временен проблем")
+        return content_response("готово след retry")
+
+    monkeypatch.setattr(client_module.requests, "post", fake_post)
+    slept = []
+    client = LLMClient(make_config(model_max_retries=3), sleep_fn=lambda s: slept.append(s))
+
+    result = client.complete(Role.WRITER, "промпт")
+
+    assert result == "готово след retry"
+    assert attempts["n"] == 3
+    assert len(slept) == 2  # изчакване след 1-ви и 2-ри неуспешен опит, нарастващо
+
+
+def test_complete_falls_back_to_secondary_model_after_retries_exhausted(monkeypatch):
+    def fake_post(url, headers, json, timeout):
+        if json["model"] == "writer-model":
+            raise requests.exceptions.ConnectionError("основният модел е недостъпен")
+        return content_response("отговори fallback моделът")
+
+    monkeypatch.setattr(client_module.requests, "post", fake_post)
+    client = LLMClient(make_config(model_max_retries=2), sleep_fn=lambda s: None)
+
+    result = client.complete(Role.WRITER, "промпт")
+
+    assert result == "отговори fallback моделът"
+    assert client.call_log[0].used_fallback is True
+
+
+def test_complete_raises_model_unavailable_with_human_message_when_fallback_also_fails(monkeypatch):
+    def fake_post(url, headers, json, timeout):
+        raise requests.exceptions.ConnectionError("всичко е недостъпно")
+
+    monkeypatch.setattr(client_module.requests, "post", fake_post)
+    client = LLMClient(make_config(model_max_retries=2), sleep_fn=lambda s: None)
+
+    with pytest.raises(ModelUnavailableError) as exc_info:
+        client.complete(Role.WRITER, "промпт")
+
+    assert "Open WebUI" in exc_info.value.human_message
+    assert client.call_log[0].success is False
+
+
+def test_complete_with_schema_parses_valid_json(monkeypatch):
+    monkeypatch.setattr(
+        client_module.requests, "post", lambda url, headers, json, timeout: content_response(VALID_PLAN_JSON)
+    )
+    client = LLMClient(make_config(), sleep_fn=lambda s: None)
+
+    result = client.complete(Role.PLANNER, "анализирай брифа", schema=PlanSchema)
+
+    assert isinstance(result, PlanSchema)
+    assert result.post_type == "практики"
+    assert result.needs_photos is True
+
+
+def test_complete_with_schema_recovers_after_corrective_retry(monkeypatch):
+    responses = iter(["това не е json изобщо", VALID_PLAN_JSON])
+
+    def fake_post(url, headers, json, timeout):
+        return content_response(next(responses))
+
+    monkeypatch.setattr(client_module.requests, "post", fake_post)
+    client = LLMClient(make_config(invalid_response_max_retries=2), sleep_fn=lambda s: None)
+
+    result = client.complete(Role.PLANNER, "анализирай брифа", schema=PlanSchema)
+
+    assert isinstance(result, PlanSchema)
+
+
+def test_complete_with_schema_gives_up_after_max_corrective_retries(monkeypatch):
+    monkeypatch.setattr(
+        client_module.requests,
+        "post",
+        lambda url, headers, json, timeout: content_response("никога не връщам валиден json"),
+    )
+    client = LLMClient(make_config(invalid_response_max_retries=1), sleep_fn=lambda s: None)
+
+    with pytest.raises(InvalidResponseError) as exc_info:
+        client.complete(Role.PLANNER, "анализирай брифа", schema=PlanSchema)
+
+    assert "planner" in exc_info.value.human_message
+
+
+def test_check_connection_reports_per_model_status_without_raising(monkeypatch):
+    def fake_post(url, headers, json, timeout):
+        if json["model"] == "media-model":
+            raise requests.exceptions.ConnectionError("media моделът е зает")
+        return content_response("ОК")
+
+    monkeypatch.setattr(client_module.requests, "post", fake_post)
+    client = LLMClient(make_config(), sleep_fn=lambda s: None)
+
+    results = client.check_connection()
+
+    assert results["planner"]["ok"] is True
+    assert results["media"]["ok"] is False
+    assert "media моделът е зает" in results["media"]["error"]

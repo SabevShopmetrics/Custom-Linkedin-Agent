@@ -1,0 +1,112 @@
+# Организации-членове. Виж docs/prompts/followup-prompt-2-knowledge-critic.md, раздел 3.
+#
+# ВАЖНО: mention_allowed: null или false → организацията НЕ се споменава по име в
+# автоматично генериран пост. Само mention_allowed: true разрешава споменаване.
+# По подразбиране забранено, не разрешено. Проверката се прилага в кода
+# (src/pipeline/critic.py), не само по преценка на модела.
+#
+# Списъкът по-долу е свален от публичната страница ictclustervarna.com/members.
+# mention_allowed е null за всички — публичното членство НЕ Е съгласие за
+# споменаване в генериран пост. Изрично 'true' трябва да дойде от клъстера.
+#
+# Разминаване между сайта и LinkedIn (2026): организации, споменати в скорошни LinkedIn
+# постове като нови членове, липсват в публичния списък на сайта — вероятно сайтът
+# изостава спрямо реалното членство. Добавени са отделно по-долу, с бележка в 'notes'.
+# `python -m src.cli check-knowledge` докладва всеки запис с непразно 'notes' поле.
+
+members:
+  # --- Пълноправни членове: фирми ---
+  - {name: "Varnapreneurs", type: "фирма", linkedin_url: "", mention_allowed: null, notes: ""}
+  - {name: "Абиликс Софт (Abilix)", type: "фирма", linkedin_url: "", mention_allowed: null, notes: ""}
+  - {name: "Адвансд Вижън ИТ (Advanced Vision IT)", type: "фирма", linkedin_url: "", mention_allowed: null, notes: ""}
+  - {name: "АйДиЕс Глобъл ООД (IDS Global)", type: "фирма", linkedin_url: "", mention_allowed: null, notes: ""}
+  - {name: "Алтскейл България (AltScale)", type: "фирма", linkedin_url: "", mention_allowed: null, notes: ""}
+  - {name: "Ардес ИТ (Ardes IT)", type: "фирма", linkedin_url: "", mention_allowed: null, notes: ""}
+  - {name: "БГ Лийдс (BG Leads)", type: "фирма", linkedin_url: "", mention_allowed: null, notes: ""}
+  - {name: "Баркод Системи България (Barcode Systems)", type: "фирма", linkedin_url: "", mention_allowed: null, notes: ""}
+  - {name: "ВИБО Инженеринг (VIBO Engineering)", type: "фирма", linkedin_url: "", mention_allowed: null, notes: ""}
+  - {name: "ВИТЕХ (VTech)", type: "фирма", linkedin_url: "", mention_allowed: null, notes: ""}
+  - {name: "Виваком (Vivacom)", type: "фирма", linkedin_url: "", mention_allowed: null, notes: ""}
+  - {name: "Ди Екс Си България (DXC Bulgaria)", type: "фирма", linkedin_url: "", mention_allowed: null, notes: ""}
+  - {name: "Зариба ЕООД (Zariba)", type: "фирма", linkedin_url: "", mention_allowed: null, notes: ""}
+  - {name: "ИТР Мениджмънт Консулт (ITR Management)", type: "фирма", linkedin_url: "", mention_allowed: null, notes: ""}
+  - {name: "КЕЙ БИ СИ Глобал Сървисис БГ (KBC Global)", type: "фирма", linkedin_url: "", mention_allowed: null, notes: ""}
+  - {name: "Мултимедия.БГ (Multimedia.BG)", type: "фирма", linkedin_url: "", mention_allowed: null, notes: ""}
+  - {name: "НаутикБлу (NauticBlue)", type: "фирма", linkedin_url: "", mention_allowed: null, notes: ""}
+  - {name: "Нетпик (Netpeak)", type: "фирма", linkedin_url: "", mention_allowed: null, notes: ""}
+  - {name: "Перфомалис (Performalis)", type: "фирма", linkedin_url: "", mention_allowed: null, notes: ""}
+  - {name: "Понтика Солюшънс (Pontica Solutions)", type: "фирма", linkedin_url: "", mention_allowed: null, notes: ""}
+  - {name: "Проинтегра / Meteobot (Prointegra)", type: "фирма", linkedin_url: "", mention_allowed: null, notes: ""}
+  - {name: "Региоком България КЧТ (Regiocom)", type: "фирма", linkedin_url: "", mention_allowed: null, notes: ""}
+  - {name: "Ронева ООД (Roneva)", type: "фирма", linkedin_url: "", mention_allowed: null, notes: ""}
+  - {name: "Роял Технолоджи ЕООД (Royal Technology)", type: "фирма", linkedin_url: "", mention_allowed: null, notes: ""}
+  - {name: "СИС Технология (SIS Technology)", type: "фирма", linkedin_url: "", mention_allowed: null, notes: ""}
+  - {name: "Солвей Соди (Solvay Sodi)", type: "фирма", linkedin_url: "", mention_allowed: null, notes: ""}
+  - {name: "СофтСърв България (SoftServe Bulgaria)", type: "фирма", linkedin_url: "", mention_allowed: null, notes: ""}
+  - {name: "Сървис О Ес (ServiceOS)", type: "фирма", linkedin_url: "", mention_allowed: null, notes: ""}
+  - {name: "ТОП рент а кар (TOP rent-a-car)", type: "фирма", linkedin_url: "", mention_allowed: null, notes: ""}
+  - {name: "Телекомуникационна компания Варна (TCV)", type: "фирма", linkedin_url: "", mention_allowed: null, notes: ""}
+  - {name: "Темпус 2000 (Tempus)", type: "фирма", linkedin_url: "", mention_allowed: null, notes: ""}
+  - {name: "Уча.се (Ucha.se)", type: "фирма", linkedin_url: "", mention_allowed: null, notes: ""}
+  - {name: "Фенси-студио ООД (Fancy Studio)", type: "фирма", linkedin_url: "", mention_allowed: null, notes: ""}
+  - {name: "Шопметрикс Европа (Shopmetrics)", type: "фирма", linkedin_url: "", mention_allowed: null, notes: ""}
+  - {name: "Ънбелийвъбъл Диджитъл (Unbelievable Digital)", type: "фирма", linkedin_url: "", mention_allowed: null, notes: ""}
+  - {name: "Юникорн системс (Unicorn Systems)", type: "фирма", linkedin_url: "", mention_allowed: null, notes: ""}
+
+  # --- Пълноправни членове: университети / военноморска академия ---
+  - {name: "ВВМУ \"Никола Вапцаров\"", type: "университет", linkedin_url: "", mention_allowed: null, notes: ""}
+  - {name: "Икономически университет - Варна", type: "университет", linkedin_url: "", mention_allowed: null, notes: ""}
+  - {name: "Технически университет - Варна", type: "университет", linkedin_url: "", mention_allowed: null, notes: ""}
+  - {name: "Шуменски университет „Епископ Константин Преславски\"", type: "университет", linkedin_url: "", mention_allowed: null, notes: ""}
+
+  # --- Асоциирани членове: университети ---
+  - {name: "Варненски Свободен Университет", type: "университет", linkedin_url: "", mention_allowed: null, notes: ""}
+  - {name: "Висше Училище по Мениджмънт", type: "университет", linkedin_url: "", mention_allowed: null, notes: ""}
+  - {name: "Медицински Университет - Варна", type: "университет", linkedin_url: "", mention_allowed: null, notes: ""}
+
+  # --- Асоциирани членове: гимназии/училища ---
+  - {name: "VII СУ \"Найден Геров\"", type: "гимназия", linkedin_url: "", mention_allowed: null, notes: ""}
+  - {name: "Варненска търговска гимназия „Г. Ст. Раковски\"", type: "гимназия", linkedin_url: "", mention_allowed: null, notes: ""}
+  - {name: "ГПЧЕ „Йоан Екзарх\"", type: "гимназия", linkedin_url: "", mention_allowed: null, notes: ""}
+  - {name: "МГ „Д-р Петър Берон\"", type: "гимназия", linkedin_url: "", mention_allowed: null, notes: ""}
+  - {name: "НУ \"Васил Левски\"", type: "гимназия", linkedin_url: "", mention_allowed: null, notes: ""}
+  - {name: "ОУ „Панайот Волов\"", type: "гимназия", linkedin_url: "", mention_allowed: null, notes: ""}
+  - {name: "ОУ „Петко Р. Славейков\"", type: "гимназия", linkedin_url: "", mention_allowed: null, notes: ""}
+  - {name: "ОбУ „Христо Ботев\"", type: "гимназия", linkedin_url: "", mention_allowed: null, notes: ""}
+  - {name: "ПГ по електротехника – Варна", type: "гимназия", linkedin_url: "", mention_allowed: null, notes: ""}
+  - {name: "ПГИ \"Д-р Иван Богоров\"", type: "гимназия", linkedin_url: "", mention_allowed: null, notes: ""}
+  - {name: "ПГКМКС \"Академик Благовест Сендов\"", type: "гимназия", linkedin_url: "", mention_allowed: null, notes: ""}
+  - {name: "ПГТ \"Проф. д-р Асен Златаров\"", type: "гимназия", linkedin_url: "", mention_allowed: null, notes: ""}
+  - {name: "Професионална техническа гимназия - Варна", type: "гимназия", linkedin_url: "", mention_allowed: null, notes: ""}
+  - {name: "Първа езикова гимназия", type: "гимназия", linkedin_url: "", mention_allowed: null, notes: ""}
+  - {name: "СУ \"Сава Доброплодни\" - Шумен", type: "гимназия", linkedin_url: "", mention_allowed: null, notes: ""}
+  - {name: "СУ „Димитър Талев\" - Добрич", type: "гимназия", linkedin_url: "", mention_allowed: null, notes: ""}
+  - {name: "СУ „Димчо Дебелянов\"", type: "гимназия", linkedin_url: "", mention_allowed: null, notes: ""}
+  - {name: "СУ „Любен Каравелов\" - Добрич", type: "гимназия", linkedin_url: "", mention_allowed: null, notes: ""}
+  - {name: "СУ „Неофит Бозвели\"", type: "гимназия", linkedin_url: "", mention_allowed: null, notes: ""}
+  - {name: "СУ „Пейо Крачолов Яворов\"", type: "гимназия", linkedin_url: "", mention_allowed: null, notes: ""}
+  - {name: "СУ „Св. Климент Охридски\" – Аксаково", type: "гимназия", linkedin_url: "", mention_allowed: null, notes: ""}
+  - {name: "ЧПГ \"Антоан дьо Сент Екзюпери\"", type: "гимназия", linkedin_url: "", mention_allowed: null, notes: ""}
+
+  # --- Асоциирани членове: НПО/организации ---
+  - {name: "БЕРР", type: "НПО", linkedin_url: "", mention_allowed: null, notes: ""}
+  - {name: "Българска асоциация на морските капитани", type: "НПО", linkedin_url: "", mention_allowed: null, notes: ""}
+  - {name: "Българска секция на ИИЕЕ (IEEE Bulgaria)", type: "НПО", linkedin_url: "", mention_allowed: null, notes: ""}
+  - {name: "БАСЕЛ (Bulgarian Electrical & Electronics Association)", type: "НПО", linkedin_url: "", mention_allowed: null, notes: ""}
+  - {name: "Български Бизнес Форуми", type: "НПО", linkedin_url: "", mention_allowed: null, notes: ""}
+  - {name: "Варненска Търговско-Индустриална Камара", type: "НПО", linkedin_url: "", mention_allowed: null, notes: ""}
+  - {name: "Изследователски институт \"Зангадор\"", type: "НПО", linkedin_url: "", mention_allowed: null, notes: ""}
+  - {name: "РАПИВ", type: "НПО", linkedin_url: "", mention_allowed: null, notes: ""}
+  - {name: "Съюз на Математиците в България - Варна", type: "НПО", linkedin_url: "", mention_allowed: null, notes: ""}
+  - {name: "Фондация \"Източен Акселератор\"", type: "НПО", linkedin_url: "", mention_allowed: null, notes: ""}
+  - {name: "Фондация Смарт Варна", type: "НПО", linkedin_url: "", mention_allowed: null, notes: ""}
+  - {name: "Фондация \"МГ д-р Петър Берон – Варна\"", type: "НПО", linkedin_url: "", mention_allowed: null, notes: ""}
+
+  # --- Нови членове, споменати в LinkedIn постове от 2026, но липсващи в
+  #     публичния списък на сайта към момента на извличане — вероятно сайтът изостава. ---
+  - {name: "Devia Bulgaria", type: "фирма", linkedin_url: "", mention_allowed: null, notes: "нов член, споменат в LinkedIn пост 2026 — липсва на сайта ictclustervarna.com/members"}
+  - {name: "СУХНИ „Константин Преславски\"", type: "гимназия", linkedin_url: "", mention_allowed: null, notes: "нов член, споменат в LinkedIn пост 2026 — липсва на сайта ictclustervarna.com/members"}
+  - {name: "Варненска морска гимназия „Св. Николай Чудотворец\"", type: "гимназия", linkedin_url: "", mention_allowed: null, notes: "нов член, споменат в LinkedIn пост 2026 — липсва на сайта ictclustervarna.com/members"}
+  - {name: "Фондация „Нова идея\"", type: "НПО", linkedin_url: "", mention_allowed: null, notes: "нов член, споменат в LinkedIn пост 2026 — липсва на сайта ictclustervarna.com/members"}
+  - {name: "СУЕО „Александър Сергеевич Пушкин\"", type: "гимназия", linkedin_url: "", mention_allowed: null, notes: "нов член, споменат в LinkedIn пост 2026 — липсва на сайта ictclustervarna.com/members"}
+  - {name: "Фондация „Площад наука\"", type: "НПО", linkedin_url: "", mention_allowed: null, notes: "нов член, споменат в LinkedIn пост 2026 — липсва на сайта ictclustervarna.com/members"}

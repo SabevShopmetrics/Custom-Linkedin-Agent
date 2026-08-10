@@ -1,0 +1,52 @@
+# Източник на истина за Критика — структурирани, проверими факти.
+# null = полето съществува, но стойността НЕ Е потвърдена. Критикът флагва като
+# недоказано всяко твърдение, което разчита на null поле — виж
+# docs/prompts/followup-prompt-2-knowledge-critic.md, раздел 2.
+#
+# TODO: попълва се от клъстера. Не заменяй null с предположение.
+
+organization:
+  name_bg: 'Сдружение „ИКТ-Клъстер-Варна"'
+  name_en: "ICT Cluster - Varna"
+  eik: "175578357"
+  founded: 2008
+  legal_form: "сдружение с нестопанска цел, обществена полза"
+  address: "бул. Сливница 189, ет. 3, офис 32, Варна"
+  website: "ictclustervarna.com"
+
+members:
+  total: null # TODO: потвърди
+  full: null
+  associate: null
+  breakdown:
+    companies: null
+    universities: null
+    ngos: null
+    schools: null
+
+channels:
+  linkedin_followers: null # TODO: актуализира се периодично
+  linkedin_url: "https://bg.linkedin.com/company/ict-cluster-varna"
+
+# Забележка за програмите по-долу: изведени са от текста на 12 реални LinkedIn поста
+# (виж docs/prompts/followup-prompt-2-knowledge-critic.md, раздел 8, и
+# knowledge/examples/good/). Числата в тях (5 издания, 30 000 лв.) идват от самите
+# постове, source: "linkedin_post" — НЕ са допълнително верифицирани от клъстера.
+# Критикът може да ги цитира с source: facts.yaml, но с бележка за произхода им.
+programs:
+  - name: 'Фонд „Мост към бъдещето"'
+    description: "финансиране на образователни/научни/иновационни проекти на ученици, студенти, преподаватели от Варна, Шумен, Добрич"
+    funded_by: "Коледен благотворителен бал на ИКТ Клъстер – Варна"
+    first_ball_raised: "над 30 000 лв. (source: linkedin_post)"
+    sessions_held: null # TODO: потвърди точен брой сесии
+  - name: "Сверяване на часовника"
+    description: "годишно флагманско събитие"
+    editions_confirmed: 5 # source: linkedin_post — "петото издание", юни 2026
+  - name: "ТЕХНОСТАРТ Weekend"
+    description: "AI хакатон"
+  - name: "CONNEXUS"
+    description: "Черноморски технологичен форум"
+  - name: "Академия TechnoLab"
+    description: ""
+  - name: 'Пролетен бизнес форум „Среща под звездите"'
+    description: ""

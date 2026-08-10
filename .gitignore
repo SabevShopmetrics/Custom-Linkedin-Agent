@@ -1,0 +1,21 @@
+# среда и тайни
+.env
+*.env.local
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+
+# резултати от реални постове — остават локално, не в git
+posts/*/
+!posts/_example/
+
+# ОС
+.DS_Store
+Thumbs.db
