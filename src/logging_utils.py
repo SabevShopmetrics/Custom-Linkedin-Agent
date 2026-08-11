@@ -15,6 +15,27 @@ from pathlib import Path
 
 LOGGER_NAME = "linkedin_agent"
 
+# Handler-и, които преживяват handlers.clear() в setup_run_logger. Нужни са на
+# интерактивния режим (src/repl.py): той се закача веднъж, а run_pipeline се вика
+# по веднъж на всеки промпт и всеки път пренастройва logger-а от нула.
+_persistent_handlers: list[logging.Handler] = []
+
+
+def register_persistent_handler(handler: logging.Handler) -> None:
+    """
+    Закача handler, който остава закачен през всички следващи run-ове. Докато има
+    поне един такъв, setup_run_logger НЕ добавя своя конзолен handler — този, който
+    се е регистрирал, поема конзолния изход и сам решава как да го форматира.
+    """
+    if handler not in _persistent_handlers:
+        _persistent_handlers.append(handler)
+
+
+def unregister_persistent_handler(handler: logging.Handler) -> None:
+    if handler in _persistent_handlers:
+        _persistent_handlers.remove(handler)
+    logging.getLogger(LOGGER_NAME).removeHandler(handler)
+
 
 def setup_run_logger(post_dir: Path, *, console_level: int = logging.WARNING) -> logging.Logger:
     """
@@ -23,6 +44,10 @@ def setup_run_logger(post_dir: Path, *, console_level: int = logging.WARNING) ->
       - конзолен на `console_level` (по подразбиране WARNING) — за да не дублира
         съществуващите print() съобщения в cli.py, само предупреждения/грешки се
         показват допълнително на конзолата в реално време
+
+    Ако има регистрирани persistent handler-и (виж register_persistent_handler),
+    конзолният handler се пропуска — иначе интерактивният режим би показвал всяко
+    предупреждение два пъти, в два различни формата.
 
     Извиква се наново при всяко run_pipeline() извикване — handlers се изчистват
     първо, за да не се трупат дубликати при повторни извиквания в един процес (напр.
@@ -41,10 +66,14 @@ def setup_run_logger(post_dir: Path, *, console_level: int = logging.WARNING) ->
     file_handler.setFormatter(formatter)
     logger.addHandler(file_handler)
 
-    console_handler = logging.StreamHandler()
-    console_handler.setLevel(console_level)
-    console_handler.setFormatter(formatter)
-    logger.addHandler(console_handler)
+    if _persistent_handlers:
+        for handler in _persistent_handlers:
+            logger.addHandler(handler)
+    else:
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(console_level)
+        console_handler.setFormatter(formatter)
+        logger.addHandler(console_handler)
 
     return logger
 

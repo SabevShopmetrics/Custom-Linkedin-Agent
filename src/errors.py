@@ -11,8 +11,15 @@ HTTP код като единствено обяснение.
     ├── BriefingNotFilledError     — briefing.md е нередактиран шаблон, спира преди LLM извиквания
     ├── ModelUnavailableError      — модел не отговаря след retry + fallback
     ├── InvalidResponseError       — модел върна невалиден структуриран изход
-    ├── ImageTooLargeError         — снимка не може да се свие под лимита
-    └── NeedsHumanReviewError      — Критикът/GDPR правилата спряха конвейера, needs_human
+    └── ImageTooLargeError         — снимка не може да се свие под лимита
+
+Забележете какво НЯМА в списъка: грешка за „текстът не е одобрен". До 2026-08-11
+съществуваше `NeedsHumanReviewError` — Критикът спираше конвейера с needs_human и човекът
+оставаше без предложение. Премахната по потребителска инструкция: присъдата на Критика вече
+не е вето, а дневен ред за втори пост (виж src/pipeline/runner.py и
+docs/technical/process-3.md). Единствените причини конвейерът да спре са вход (липсващ или
+нередактиран бриф) и инфраструктура (недостъпен модел, невалиден изход, огромна снимка) —
+никога преценка за качеството на текста.
 
 `NoPhotosWarning` не е грешка (не наследява AgentError) — тя е сигнал, който се
 логва и се записва в meta.json, но никога не спира конвейера.
@@ -100,37 +107,6 @@ class ImageTooLargeError(AgentError):
         self.filename = filename
         self.size_bytes = size_bytes
         self.limit_bytes = limit_bytes
-
-
-class NeedsHumanReviewError(AgentError):
-    """
-    Конвейерът спря и статусът е 'needs_human' — нищо не се трие, всичко натрупано
-    остава на диска. Задейства се от два различни спусъка (виж src/pipeline/runner.py).
-
-    От 2026-08-10 (потребителска инструкция): GDPR находки (споменаване на организация
-    без mention_allowed, лично име извън брифа, снимка с вероятно непълнолетни) вече НЕ
-    спират конвейера — само предупреждения в meta.json/run.log. Виж
-    docs/prompts/followup-prompt-3-gdpr-warnings-and-logging.md.
-
-      - hard_reject от Критика (нарушение на rules/forbidden.md — политическа неутралност,
-        критика на партньори и т.н.) — веднага, без опит за пренаписване (immediate=True)
-      - Критикът все още не одобрява текста след всички опити за ревизия
-        (immediate=False)
-    """
-
-    def __init__(self, post_dir: str, reasons: list[str], *, immediate: bool) -> None:
-        reasons_text = "; ".join(reasons) if reasons else "(без подробности)"
-        if immediate:
-            headline = (
-                f"Постът в '{post_dir}' спря веднага — засегнато е правило от rules/forbidden.md, "
-                f"без опит за автоматично пренаписване."
-            )
-        else:
-            headline = f"Постът в '{post_dir}' беше отхвърлен от Критика и след всички опити за ревизия."
-        super().__init__(f"{headline} Статусът е 'needs_human'. Причини: {reasons_text}")
-        self.post_dir = post_dir
-        self.reasons = reasons
-        self.immediate = immediate
 
 
 class NoPhotosWarning:

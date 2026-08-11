@@ -94,7 +94,11 @@ class FactCheck(BaseModel):
 
 
 class RuleViolation(BaseModel):
-    """Нарушение на rules/forbidden.md или rules/gdpr.md — винаги води до hard_reject."""
+    """
+    Нарушение на rules/forbidden.md или rules/gdpr.md. Не спира конвейера (от 2026-08-11) —
+    влиза в дневния ред на втория пост като находка, която задължително трябва да отпадне,
+    и остава видимо в critique.md / meta.json.
+    """
 
     rule: str = Field(description="'gdpr' или 'forbidden'")
     detail: str
@@ -110,9 +114,10 @@ class CritiqueSchema(BaseModel):
       - tone_issues   → сверени срещу voice/tone.md и voice/vocabulary.md
       - rule_violations → сверени срещу rules/forbidden.md и rules/gdpr.md
 
-    Всяко попадение в rule_violations принудително вдига verdict до HARD_REJECT
-    (виж src/pipeline/critic.py:enforce_code_level_rules) — не подлежи на
-    автоматично пренаписване, дори ако моделът сам не е сложил verdict правилно.
+    Нарушение извън GDPR вдига verdict до HARD_REJECT (виж
+    src/pipeline/critic.py:enforce_code_level_rules), дори ако моделът сам не го е сложил.
+    От 2026-08-11 verdict е само етикет за сериозност — не спира конвейера и не отхвърля
+    поста; сортира находките в дневния ред на втория пост (виж critic.collect_findings).
     """
 
     verdict: Verdict

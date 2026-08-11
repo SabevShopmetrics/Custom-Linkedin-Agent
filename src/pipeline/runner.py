@@ -1,27 +1,36 @@
 """
-Оркестрира шестте стъпки на конвейера и управлява възобновяемостта.
+Оркестрира конвейера и управлява възобновяемостта.
 
-Верига: Планер → (Писател || Media Picker) → Критик → в зависимост от присъдата:
-  - OK              → направо към Консолидатор
-  - NEEDS_REVISION  → Писателят получава до `max_revision_attempts` опита (по подразбиране
-                       2) — на всеки кръг Критикът препрочита и ако все още не е доволен,
-                       конкретната му препоръка (summary) се подава директно на следващия
-                       опит, не просто списък от проблеми. Ако след всички опити пак не е
-                       "ok" → needs_human.
-  - HARD_REJECT     → спира веднага, на който и да е кръг, БЕЗ по-нататъшни опити — само
-                       за нарушение на rules/forbidden.md (виж critic.py). GDPR вече НЕ
-                       предизвиква hard_reject (виж по-долу).
+Верига (от 2026-08-11, потребителска инструкция — виж docs/technical/process-3.md):
 
-От 2026-08-10 (потребителска инструкция): GDPR находки (споменаване на организация без
-потвърдено mention_allowed, лично име извън брифа, снимка с вероятно непълнолетни) НЕ
-спират конвейера — конвейерът е инструмент за вътрешния маркетинг екип на клъстера, не
-автоматично публикуване към клиенти, и човек преглежда output/post.md преди публикуване
-във всички случаи. Тези находки се логват като предупреждения (WARNING в run.log и
-конзолата) и се записват в output/meta.json под "warnings" — не вдигат статус до
-needs_human. Виж docs/prompts/followup-prompt-3-gdpr-warnings-and-logging.md.
+  [1] Планер
+  [2] Писател → post_i.md        ┐ паралелно, независими
+  [3] Media Picker → media.json  ┘
+  [4] Критик върху Post I → critique.md — намира слабостите
+  [5] Писател → post_ii.md — ВТОРИ пост, който запълва тези слабости
+  [6] Консолидатор → output/post.md — официалното предложение ОТ ДВАТА поста
+  [7] Критик върху предложението → critique_final.md — само констатира какво остава открито
 
-Всеки run пише хронологичен лог в posts/<име>/run.log (виж src/logging_utils.py) —
-допълва meta.json с четим наратив на решенията по пътя.
+Какво се смени и защо: дотогава Критикът беше вето. Присъда needs_revision пращаше
+Писателя на до 2 опита да пренапише същия текст, а после конвейерът спираше с needs_human
+и хвърляше NeedsHumanReviewError; нарушение на rules/forbidden.md спираше веднага. На
+практика това значеше, че при строг Критик човекът не получаваше нищо — при реален тест
+на 2026-08-11 три поредни кръга свършиха с "отхвърлен", без предложение на изхода.
+
+Сега Критикът не отхвърля. Находките му са дневен ред за втори пост, а Консолидаторът
+съставя официалното предложение от двата — по-силната формулировка за всяко твърдение.
+Конвейерът ВИНАГИ стига до предложение. Статусът казва само дали остава нещо открито:
+
+  "ready"            — нищо открито след финалната проверка
+  "ready_with_notes" — има открити въпроси (тон, недоказани твърдения, правила) и/или
+                       предупреждения за снимки; предложението пак е налично
+
+Никоя присъда на Критика вече не хвърля изключение. Изключения остават само за вход и
+инфраструктура: липсващ/нередактиран бриф (преди LLM извикванията) и недостъпен модел.
+Стъпки 5, 6 и 7 са допълнително подсигурени — ако някоя от тях се счупи, конвейерът
+записва каквото има и отбелязва това като открит въпрос, вместо да остави човека без текст.
+
+Всеки run пише хронологичен лог в posts/<име>/run.log (виж src/logging_utils.py).
 """
 
 from __future__ import annotations
@@ -30,15 +39,17 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from src.brand.loader import BrandKnowledge, load_brand_knowledge
-from src.errors import BriefingMissingError, BriefingNotFilledError, NeedsHumanReviewError
-from src.llm.schema import Verdict
+from src.errors import AgentError, BriefingMissingError, BriefingNotFilledError
 from src.llm.client import LLMClient
 from src.logging_utils import setup_run_logger
-from src.pipeline import consolidator, critic, media_picker, planner, writer
+from src.pipeline import consolidator, critic, formatting, media_picker, planner, writer
 from src.pipeline.consolidator import PipelineResult
-from src.pipeline.util import read_text_or_none, should_skip, write_text
+from src.pipeline.util import read_text_or_none, write_text
 
 EXAMPLE_BRIEFING_PATH = Path("posts/_example/briefing.md")
+
+SECOND_POST_FILENAME = "post_ii.md"
+FINAL_CRITIQUE_FILENAME = "critique_final.md"
 
 
 def _is_unfilled_template(briefing_text: str, template_path: Path = EXAMPLE_BRIEFING_PATH) -> bool:
@@ -54,46 +65,12 @@ def _is_unfilled_template(briefing_text: str, template_path: Path = EXAMPLE_BRIE
     return briefing_text.strip() == template_text.strip()
 
 
-_ROUND_SUFFIXES = ["ii", "iii", "iv", "v", "vi"]
-
-
-def _round_filenames(round_index: int) -> tuple[str, str]:
-    """round_index е 2 за първата ревизия, 3 за втората и т.н. (post_i.md/critique.md
-    вече заемат round 1)."""
-    suffix = _ROUND_SUFFIXES[round_index - 2] if round_index - 2 < len(_ROUND_SUFFIXES) else str(round_index)
-    return f"post_{suffix}.md", f"critique_{suffix}.md"
-
-
-def _collect_revision_notes(critique) -> list[str]:
-    """
-    Препоръката на Критика (summary) се подава на Писателя ПЪРВА и изрично — Критикът често
-    вече е предложил конкретно решение (напр. "формулирай благодарността структурно, без
-    имена"), не просто описание на проблема. Без това, ревизията гадае наново всеки път.
-    """
-    notes: list[str] = []
-    if critique.summary:
-        notes.append(f"Препоръка на Критика: {critique.summary}")
-    notes.extend(critique.tone_issues)
-    for fact in critique.facts:
-        if fact.source.value == "UNVERIFIED":
-            notes.append(f"Непотвърдено твърдение: \"{fact.claim}\" ({fact.note or 'няма източник'})")
-    return notes
-
-
-def _split_rule_violations(rule_violations) -> tuple[list[str], list[str]]:
-    """Връща (blocking_details, gdpr_warning_details). GDPR никога не е в blocking."""
-    blocking = [v.detail for v in rule_violations if v.rule != "gdpr"]
-    gdpr = [v.detail for v in rule_violations if v.rule == "gdpr"]
-    return blocking, gdpr
-
-
 def run_pipeline(
     post_dir: Path,
     client: LLMClient,
     *,
     force: bool = False,
     knowledge: BrandKnowledge | None = None,
-    max_revision_attempts: int = 2,
 ) -> PipelineResult:
     log = setup_run_logger(post_dir)
     log.info("=== Ново пускане на конвейера за '%s' (force=%s) ===", post_dir, force)
@@ -109,6 +86,9 @@ def run_pipeline(
 
     if knowledge is None:
         knowledge = load_brand_knowledge()
+
+    warnings: list[str] = []
+    open_notes: list[str] = []
 
     # [1] Планер
     log.info("[1] Планер...")
@@ -126,108 +106,134 @@ def run_pipeline(
         media_selection, no_photos = media_future.result()
     if no_photos:
         log.warning("Папката photos/ е празна — постът ще съдържа само текст.")
-    log.info("[2]/[3] готово: чернова %d символа, %d избрани снимки", len(post_i_text), len(media_selection.selected))
+    log.info("[2]/[3] готово: Post I %d символа, %d избрани снимки", len(post_i_text), len(media_selection.selected))
 
-    reasons: list[str] = []
-    warnings: list[str] = []
-    immediate = False
-
-    # [4] Критик
-    log.info("[4] Критик (кръг 1)...")
+    # [4] Критик върху Post I — намира какво да запълни вторият пост
+    log.info("[4] Критик върху Post I...")
     critique = critic.run(post_dir, client, knowledge, plan, briefing_text, post_i_text, force=force)
-    log.info("[4] Присъда: %s", critique.verdict.value)
+    findings = critic.collect_findings(critique)
+    log.info("[4] Критик готово: присъда=%s, %d находки за запълване", critique.verdict.value, len(findings))
 
-    if critique.verdict == Verdict.OK:
-        final_text = post_i_text
-        post_ii_path = post_dir / "post_ii.md"
-        if should_skip(post_ii_path, force=force):
-            final_text = read_text_or_none(post_ii_path) or final_text
-        else:
-            write_text(post_ii_path, final_text)
-        _, gdpr = _split_rule_violations(critique.rule_violations)
-        warnings.extend(gdpr)
-
-    elif critique.verdict == Verdict.HARD_REJECT:
-        # Правило: твърд отказ (rules/forbidden.md) не се пренаписва — минава директно на човек.
-        final_text = post_i_text
-        immediate = True
-        blocking, gdpr = _split_rule_violations(critique.rule_violations)
-        reasons.extend(blocking)
-        warnings.extend(gdpr)
-        log.error("[4] HARD_REJECT (forbidden): %s", "; ".join(blocking))
-
-    else:  # NEEDS_REVISION — до max_revision_attempts опита, всеки път с конкретната
-        # препоръка на предишния кръг Критик подадена директно на Писателя
-        current_draft = post_i_text
-        current_critique = critique
-        round_index = 2
-
-        while current_critique.verdict == Verdict.NEEDS_REVISION and round_index <= 1 + max_revision_attempts:
-            revision_notes = _collect_revision_notes(current_critique)
-            draft_filename, critique_filename = _round_filenames(round_index)
-            log.info("[5] Ревизия (кръг %d)...", round_index)
-            current_draft = writer.write_revision(
+    # [5] Писател → Post II. Пропуска се само когато няма нито една находка — тогава няма
+    # какво да запълва и втори модел ход би бил похарчен без причина.
+    post_ii_text: str | None = None
+    if findings:
+        log.info("[5] Писател → Post II (запълва %d находки)...", len(findings))
+        try:
+            post_ii_text = writer.write_second_post(
                 post_dir,
                 client,
                 knowledge.stable_context,
                 plan,
                 briefing_text,
-                current_draft,
-                revision_notes,
-                output_filename=draft_filename,
+                post_i_text,
+                findings,
+                output_filename=SECOND_POST_FILENAME,
                 force=force,
             )
-            current_critique = critic.run(
-                post_dir, client, knowledge, plan, briefing_text, current_draft, filename=critique_filename, force=force
+            log.info("[5] Post II готово: %d символа", len(post_ii_text))
+        except AgentError as exc:
+            # Вторият пост е подобрение, не предпоставка — без него консолидацията пада до
+            # Post I, вместо целият run да остане без текст.
+            open_notes.append(f"Вторият пост не беше написан ({exc.human_message}) — предложението е само от Post I.")
+            log.error("[5] Post II се счупи: %s", exc.human_message)
+    else:
+        log.info("[5] Пропуснат — Критикът не намери какво да се запълва.")
+
+    # [6] Консолидатор — официалното предложение от двата поста
+    log.info("[6] Консолидатор (%s)...", "Post I + Post II" if post_ii_text else "само Post I")
+    try:
+        official_text, merged_from = consolidator.synthesize(
+            post_dir,
+            client,
+            first_post=post_i_text,
+            second_post=post_ii_text,
+            findings=findings,
+            force=force,
+        )
+    except AgentError as exc:
+        # Последна линия: по-добре по-слабият от двата поста като предложение, отколкото
+        # нищо. Кой точно е използван се вижда в merged_from и в open_notes.
+        official_text = (post_ii_text or post_i_text).strip()
+        merged_from = [SECOND_POST_FILENAME if post_ii_text else "post_i.md"]
+        write_text(post_dir / "output" / "post.md", official_text + "\n")
+        open_notes.append(
+            f"Консолидаторът не успя да обедини двата поста ({exc.human_message}) — "
+            f"предложението е {merged_from[0]} без синтез."
+        )
+        log.error("[6] Консолидаторът се счупи: %s", exc.human_message)
+    log.info("[6] Предложение готово: %d символа, от %s", len(official_text), ", ".join(merged_from))
+
+    # Сравнението срещу двете чернови става СЕГА, върху необработения синтез — след
+    # автоматичните поправки по-долу текстът вече не е дословно равен на нищо и проверката
+    # би станала безсмислена.
+    if post_ii_text:
+        bypassed = consolidator.synthesis_bypassed(official_text, post_i_text, post_ii_text)
+        if bypassed:
+            note = (
+                f"Консолидаторът върна {bypassed} дословно — синтез между двата поста не се е "
+                f"случил. Сравнете post_i.md и post_ii.md ръчно; вероятно има какво да се вземе "
+                f"от другата версия."
             )
-            log.info("[5] Присъда (кръг %d): %s", round_index, current_critique.verdict.value)
-            round_index += 1
+            open_notes.append(note)
+            log.warning("[6] %s", note)
 
-        final_text = current_draft
-        _, gdpr = _split_rule_violations(current_critique.rule_violations)
-        warnings.extend(gdpr)
+    # [6б] Механичните правила от корпуса — налагат се в кода, не се оставят на модел.
+    # Върви ПРЕДИ финалната проверка, за да не хаби Критикът бележки за вече поправени неща,
+    # и ПРЕДИ записа, за да е output/post.md винаги публикуем.
+    formatted = formatting.enforce(official_text, knowledge.format_rules, brief_text=briefing_text)
+    applied_fixes = formatted.fixes
+    if formatted.text != official_text:
+        official_text = formatted.text
+        write_text(post_dir / "output" / "post.md", official_text + "\n")
+    for fix in applied_fixes:
+        log.info("[6б] Поправено автоматично: %s", fix)
+    for unenforceable in formatted.unenforceable:
+        log.warning("[6б] Правило от корпуса, което кодът не може да наложи: %s", unenforceable)
+    open_notes.extend(formatted.notes)
 
-        if current_critique.verdict == Verdict.HARD_REJECT:
-            immediate = True
-            blocking, _ = _split_rule_violations(current_critique.rule_violations)
-            reasons.extend(blocking)
-            log.error("[5] HARD_REJECT (forbidden) след ревизия: %s", "; ".join(blocking))
-        elif current_critique.verdict == Verdict.NEEDS_REVISION:
-            reasons.append(current_critique.summary or "Критикът все още не одобрява текста след всички опити за ревизия.")
-            reasons.extend(current_critique.tone_issues)
-            log.warning("[5] needs_human след изчерпани опити за ревизия.")
-        # else OK — продължава нормално, последният post_<suffix>.md вече е записан
+    # [7] Критик върху предложението — само констатира, не спира. Целта е човекът да види
+    # какво остава открито в текста, който реално ще публикува, а не в междинна чернова.
+    log.info("[7] Критик върху предложението (информативно)...")
+    try:
+        final_critique = critic.run(
+            post_dir,
+            client,
+            knowledge,
+            plan,
+            briefing_text,
+            official_text,
+            filename=FINAL_CRITIQUE_FILENAME,
+            force=force,
+        )
+        open_notes.extend(critic.review_notes(final_critique))
+        log.info("[7] Финална проверка: %d открити въпроса", len(critic.review_notes(final_critique)))
+    except AgentError as exc:
+        open_notes.append(f"Финалната проверка не успя ({exc.human_message}) — прегледайте текста ръчно.")
+        log.error("[7] Финалната проверка се счупи: %s", exc.human_message)
 
     if any(item.possible_minor for item in media_selection.selected):
         warning_text = (
             "Избрана снимка е маркирана от Media Picker като вероятно съдържаща непълнолетни лица — "
-            "прегледайте ръчно преди публикуване (не спира конвейера)."
+            "прегледайте ръчно преди публикуване."
         )
         warnings.append(warning_text)
         log.warning(warning_text)
 
-    for w in warnings:
-        log.warning("GDPR предупреждение: %s", w)
+    status = "ready_with_notes" if (open_notes or warnings) else "ready"
+    log.info("Финален статус: %s (%d открити въпроса, %d предупреждения)", status, len(open_notes), len(warnings))
+    for note in open_notes:
+        log.warning("Открит въпрос: %s", note)
 
-    status = "needs_human" if reasons else "ready"
-    log.info("Финален статус: %s (%d предупреждения)", status, len(warnings))
-
-    # [6] Консолидатор — винаги пише output/, дори при needs_human, за да остане пълна следа.
-    result = consolidator.run(
+    return consolidator.finalize(
         post_dir,
         client,
         plan,
         media_selection,
-        final_text,
         no_photos=no_photos,
         status=status,
-        reasons=reasons,
+        open_notes=open_notes,
         warnings=warnings,
-        force=force,
+        merged_from=merged_from,
+        applied_fixes=applied_fixes,
     )
-
-    if status == "needs_human":
-        log.error("Спряно: needs_human. Причини: %s", "; ".join(reasons))
-        raise NeedsHumanReviewError(str(post_dir), reasons, immediate=immediate)
-
-    return result

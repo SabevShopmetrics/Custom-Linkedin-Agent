@@ -4,13 +4,13 @@
 и agent-bootstrap-prompt.md, раздел "ОБРАБОТКА НА ГРЕШКИ").
 """
 
+import src.errors
 from src.errors import (
     BriefingMissingError,
     BriefingNotFilledError,
     ImageTooLargeError,
     InvalidResponseError,
     ModelUnavailableError,
-    NeedsHumanReviewError,
     NoPhotosWarning,
 )
 
@@ -47,18 +47,21 @@ def test_image_too_large_error_reports_sizes_in_kb():
     assert "KB" in err.human_message
 
 
-def test_needs_human_review_error_immediate_mentions_no_rewrite_attempt():
-    err = NeedsHumanReviewError("posts/x", ["критикува конкурент — rules/forbidden.md"], immediate=True)
-    assert "needs_human" in err.human_message
-    assert "критикува конкурент" in err.human_message
-    assert "без опит за автоматично пренаписване" in err.human_message
+def test_there_is_no_error_for_text_the_critic_dislikes():
+    """
+    От 2026-08-11 (потребителска инструкция): Критикът не отхвърля постове, а произвежда
+    дневен ред за втори пост — виж docs/technical/process-3.md. `NeedsHumanReviewError`
+    е премахната и не бива да се връща под друго име: грешките в този модул са само за
+    вход и инфраструктура, никога за преценка на качеството на текста.
+    """
+    assert not hasattr(src.errors, "NeedsHumanReviewError")
 
-
-def test_needs_human_review_error_after_retry_mentions_revision():
-    err = NeedsHumanReviewError("posts/x", ["все още грешен тон"], immediate=False)
-    assert "needs_human" in err.human_message
-    assert "ревизия" in err.human_message
-    assert "все още грешен тон" in err.human_message
+    judgement_words = ("отхвърл", "needs_human", "не е одобрен")
+    for name in dir(src.errors):
+        attribute = getattr(src.errors, name)
+        if isinstance(attribute, type) and issubclass(attribute, src.errors.AgentError):
+            docstring = (attribute.__doc__ or "").lower()
+            assert not any(word in docstring for word in judgement_words), name
 
 
 def test_no_photos_warning_is_not_an_exception():

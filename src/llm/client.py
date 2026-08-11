@@ -29,6 +29,22 @@ from src.errors import ImageTooLargeError, InvalidResponseError, ModelUnavailabl
 from src.llm.roles import Role, model_for_role, supports_vision
 from src.llm.schema import parse_structured
 
+# "Expecting ',' delimiter" / "Expecting ':' delimiter" почти винаги значат неескейпната
+# кавичка вътре в стойност на низ (моделът цитира фраза и забравя да екранира \") —
+# открито при реално end-to-end тестване на 2026-08-10. Генеричното "невалиден JSON"
+# съобщение не помага на модела да поправи точно това; конкретна диагноза помага.
+_QUOTE_ESCAPE_HINT = (
+    " Вероятна причина: неескейпната кавичка (\") вътре в стойност на низ (напр. цитираш "
+    "фраза с \" вместо ' или без кавички). Никога не влагай \" или „...\" в JSON низ — "
+    "ползвай единични кавички ' или перифразирай без кавички."
+)
+
+
+def _corrective_hint(error_text: str) -> str:
+    if "delimiter" in error_text:
+        return _QUOTE_ESCAPE_HINT
+    return ""
+
 
 @dataclass
 class CallLogEntry:
@@ -122,8 +138,8 @@ class LLMClient:
                                 "role": "user",
                                 "content": (
                                     "Отговорът не е валиден JSON по исканата схема. Грешка: "
-                                    f"{last_error}. Върни САМО валиден JSON обект, без обяснения "
-                                    "и без markdown ограждане."
+                                    f"{last_error}.{_corrective_hint(last_error)} Върни САМО валиден "
+                                    "JSON обект, без обяснения и без markdown ограждане."
                                 ),
                             },
                         ]

@@ -40,6 +40,9 @@ def test_generate_with_brief_creates_folder_and_writes_briefing(tmp_path, monkey
             post_path = pd / "output" / "post.md"
             output_dir = pd / "output"
             warnings = []
+            open_notes = []
+            merged_from = ["post_i.md", "post_ii.md"]
+            applied_fixes = []
 
         return Result()
 
@@ -81,6 +84,9 @@ def test_generate_without_brief_uses_explicit_force_flag(tmp_path, monkeypatch):
             post_path = pd / "output" / "post.md"
             output_dir = pd / "output"
             warnings = []
+            open_notes = []
+            merged_from = ["post_i.md", "post_ii.md"]
+            applied_fixes = []
 
         return Result()
 

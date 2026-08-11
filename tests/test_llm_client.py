@@ -7,7 +7,7 @@ import requests
 
 import src.llm.client as client_module
 from src.errors import InvalidResponseError, ModelUnavailableError
-from src.llm.client import LLMClient
+from src.llm.client import LLMClient, _corrective_hint
 from src.llm.roles import Role
 from src.llm.schema import PlanSchema
 from tests.conftest import content_response, make_config
@@ -113,6 +113,43 @@ def test_complete_with_schema_recovers_after_corrective_retry(monkeypatch):
     result = client.complete(Role.PLANNER, "анализирай брифа", schema=PlanSchema)
 
     assert isinstance(result, PlanSchema)
+
+
+def test_complete_with_schema_corrective_message_includes_quote_hint_for_delimiter_errors(monkeypatch):
+    """
+    Регресионен тест за реален пропуск от 2026-08-10: моделът върна JSON с неескейпната
+    ASCII кавичка вътре в стойност на низ ('Expecting ',' delimiter' от json.loads).
+    Генеричното 'невалиден JSON' съобщение не сочи конкретния проблем — сега поправящият
+    промпт трябва изрично да спомене кавичките, за да има модел шанс реално да го оправи.
+    """
+    broken_json = '{"post_type": "х", "format": "у "з"", "tone": "z", "needs_photos": false, "max_photo_count": 0, "is_sensitive": false}'
+    captured_messages = []
+
+    def fake_post(url, headers, json, timeout):
+        captured_messages.append(json["messages"])
+        if len(captured_messages) == 1:
+            return content_response(broken_json)
+        return content_response(
+            '{"post_type": "х", "format": "y", "tone": "z", "needs_photos": false, "max_photo_count": 0, "is_sensitive": false}'
+        )
+
+    monkeypatch.setattr(client_module.requests, "post", fake_post)
+    client = LLMClient(make_config(invalid_response_max_retries=1), sleep_fn=lambda s: None)
+
+    result = client.complete(Role.PLANNER, "анализирай брифа", schema=PlanSchema)
+
+    assert isinstance(result, PlanSchema)
+    second_call_messages = captured_messages[1]
+    corrective_message = second_call_messages[-1]["content"]
+    assert "кавичка" in corrective_message
+
+
+def test_corrective_hint_flags_delimiter_errors_as_likely_quote_issue():
+    assert "кавичка" in _corrective_hint("Expecting ',' delimiter: line 3 column 10 (char 42)")
+
+
+def test_corrective_hint_empty_for_unrelated_errors():
+    assert _corrective_hint("JSON не съответства на очакваната схема PlanSchema: ...") == ""
 
 
 def test_complete_with_schema_gives_up_after_max_corrective_retries(monkeypatch):

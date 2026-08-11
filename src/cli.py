@@ -1,7 +1,12 @@
 """
-Входна точка: `python -m src.cli <команда> ...`
+Входна точка: `python -m src.cli [команда] ...`
+
+БЕЗ команда се отваря интерактивна сесия (виж src/repl.py) — човек пише бриф на
+промпта, агентът отпечатва готовия пост, /revise го дошлайфа. Това е нормалният
+начин за работа; командите по-долу остават за скриптове и еднократни проверки.
 
 Команди:
+  chat                             — същото като без команда: интерактивна сесия
   generate <post_dir> [--force] [--brief "текст"]   — минава през шестте стъпки на конвейера
                                                         (--brief пише директно briefing.md,
                                                         създава папката, ако не съществува —
@@ -23,23 +28,10 @@ from src.config import ConfigError, load_config
 from src.errors import AgentError
 from src.llm.client import LLMClient
 from src.pipeline.runner import run_pipeline
+from src.terminal import force_utf8_io
 
 POSTS_DIR = Path("posts")
 EXAMPLE_DIR = POSTS_DIR / "_example"
-
-
-def _force_utf8_console() -> None:
-    """
-    Windows конзолата по подразбиране е cp1252, което гърми на кирилица.
-    Пренасочваме stdout/stderr към UTF-8, ако терминалът го поддрев.
-    """
-    for stream in (sys.stdout, sys.stderr):
-        reconfigure = getattr(stream, "reconfigure", None)
-        if reconfigure is not None:
-            try:
-                reconfigure(encoding="utf-8")
-            except Exception:  # pragma: no cover — най-добро усилие, никога не бива да чупи CLI-то
-                pass
 
 
 def cmd_generate(args: argparse.Namespace) -> int:
@@ -76,13 +68,21 @@ def cmd_generate(args: argparse.Namespace) -> int:
         print(f"Пълен лог: {post_dir / 'run.log'}")
         return 1
 
-    if result.status == "ready":
-        print(f"\n✓ Готово. Постът е в: {result.post_path}")
-    else:
-        print(f"\n⚠ Статус '{result.status}' — прегледайте ръчно: {result.output_dir}")
+    merged = ", ".join(result.merged_from) or "?"
+    print(f"\n✓ Официалното предложение е в: {result.post_path} (от {merged})")
+
+    if result.applied_fixes:
+        print(f"\n✎ {len(result.applied_fixes)} автоматична(и) поправка(и) по правилата от knowledge/voice/:")
+        for fix in result.applied_fixes:
+            print(f"  - {fix}")
+
+    if result.open_notes:
+        print(f"\n⚠ {len(result.open_notes)} открит(и) въпрос(а) в предложението — прегледайте преди публикуване:")
+        for note in result.open_notes:
+            print(f"  - {note}")
 
     if result.warnings:
-        print(f"\n⚠ {len(result.warnings)} предупреждение(я) (GDPR/снимки) — не спират поста, но прегледайте преди публикуване:")
+        print(f"\n⚠ {len(result.warnings)} предупреждение(я) за снимки:")
         for warning in result.warnings:
             print(f"  - {warning}")
 
@@ -170,9 +170,23 @@ def cmd_check_knowledge(_args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_chat(_args: argparse.Namespace) -> int:
+    # Импортът е вътре във функцията, за да не се плаща цената му при `generate`/`check`
+    # в скрипт или cron — repl.py тегли конфигурация, knowledge и терминални неща.
+    from src.repl import Repl
+
+    return Repl().run()
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="python -m src.cli", description="LinkedIn агент — ИКТ Клъстер Варна")
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    parser = argparse.ArgumentParser(
+        prog="python -m src.cli",
+        description="LinkedIn агент — ИКТ Клъстер Варна (без команда: интерактивна сесия)",
+    )
+    subparsers = parser.add_subparsers(dest="command")
+
+    chat_parser = subparsers.add_parser("chat", help="интерактивна сесия в терминала (по подразбиране)")
+    chat_parser.set_defaults(func=cmd_chat)
 
     generate_parser = subparsers.add_parser("generate", help="генерира пост от бриф + снимки")
     generate_parser.add_argument("post_dir", help="папка на поста, напр. posts/2026-07-praktiki")
@@ -203,9 +217,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    _force_utf8_console()
+    force_utf8_io()
     parser = build_parser()
     args = parser.parse_args(argv)
+    if getattr(args, "func", None) is None:
+        return cmd_chat(args)
     return args.func(args)
 
 

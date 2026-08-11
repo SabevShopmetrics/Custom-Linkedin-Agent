@@ -18,6 +18,8 @@ from typing import Any
 
 import yaml
 
+from src.brand.format_rules import FormatRules, parse_format_rules
+
 DEFAULT_KNOWLEDGE_DIR = Path("knowledge")
 
 # (относителен път, заглавие в промпта) — реда тук определя реда в stable_context
@@ -60,6 +62,10 @@ class BrandKnowledge:
     good_examples: list[str]
     bad_examples: list[str]
     audit: list[KnowledgeAudit]
+    # Механичните правила, извлечени от същите файлове — виж src/brand/format_rules.py.
+    # Стоят тук, а не в pipeline кода, защото са част от корпуса: клъстерът ги променя в
+    # tone.md/formats.md, не в Python.
+    format_rules: FormatRules = field(default_factory=FormatRules)
 
     def missing_sources_summary(self) -> str:
         missing = [a.path for a in self.audit if not a.usable]
@@ -141,14 +147,21 @@ def load_brand_knowledge(knowledge_dir: Path = DEFAULT_KNOWLEDGE_DIR) -> BrandKn
 
     stable_context = "\n\n".join(blocks)
 
+    facts = facts_raw if isinstance(facts_raw, dict) else None
+
     return BrandKnowledge(
         stable_context=stable_context,
-        facts=facts_raw if isinstance(facts_raw, dict) else None,
+        facts=facts,
         facts_available=facts_available,
         members=members,
         good_examples=good_examples,
         bad_examples=bad_examples,
         audit=audit,
+        format_rules=parse_format_rules(
+            _read_text(knowledge_dir / "voice/tone.md"),
+            _read_text(knowledge_dir / "voice/formats.md"),
+            facts,
+        ),
     )
 
 

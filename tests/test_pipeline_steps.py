@@ -141,6 +141,21 @@ def test_enforce_code_level_rules_flags_personal_name_outside_briefing_as_warnin
     assert any("Иван Петров" in v.detail for v in critique.rule_violations)
 
 
+def test_enforce_code_level_rules_does_not_flag_paragraph_boundary_as_name():
+    """
+    Регресионен тест за реален пропуск: \\s+ в _NAME_PATTERN матчваше и през нов ред —
+    последната капитализирана дума на един абзац + първата на следващия се хващаха
+    погрешно като измислено "лично име" (напр. "Клъстера" + "Благодарим" на нов ред,
+    открито при реално end-to-end тестване на 2026-08-10).
+    """
+    critique = CritiqueSchema(verdict=Verdict.OK, facts=[], tone_issues=[], rule_violations=[], summary="")
+    draft = "Отчетохме резултатите пред Клъстера.\n\nБлагодарим на всички участници!"
+
+    critic.enforce_code_level_rules(critique, draft, "бриф", [])
+
+    assert critique.rule_violations == []
+
+
 def test_enforce_code_level_rules_does_not_flag_name_present_in_briefing():
     critique = CritiqueSchema(verdict=Verdict.OK, facts=[], tone_issues=[], rule_violations=[], summary="")
 
