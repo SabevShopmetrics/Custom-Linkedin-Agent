@@ -27,6 +27,8 @@ class PlanSchema(BaseModel):
 
 
 class MediaSelectionItem(BaseModel):
+    """Една снимка, избрана от Media Picker за влизане в поста."""
+
     filename: str
     reason: str
     possible_minor: bool = Field(
@@ -42,12 +44,16 @@ class MediaSelectionSchema(BaseModel):
 
 
 class Verdict(str, Enum):
+    """Етикет за сериозност от Критика — от 2026-08-11 НЕ спира конвейера (виж critic.py)."""
+
     OK = "ok"
     NEEDS_REVISION = "needs_revision"
     HARD_REJECT = "hard_reject"
 
 
 class FactSource(str, Enum):
+    """Кой от трите позволени източника проследява дадено твърдение в текста, ако изобщо."""
+
     BRIEFING = "briefing"
     FACTS_YAML = "facts.yaml"
     MEMBERS_YAML = "members.yaml"
@@ -137,12 +143,16 @@ def parse_structured(raw_text: str, schema: type[BaseModel]) -> BaseModel:
     При провал хвърля ValueError с описателно съобщение — извикващият код (llm/client.py)
     превръща това в InvalidResponseError с broй опити.
     """
+    # Стъпка 1: извади само JSON частта от суровия текст (моделът може да добави обяснение
+    # преди/след или markdown ограждане).
     candidate = _extract_json_object(raw_text)
+    # Стъпка 2: парсирай като JSON — синтактична грешка тук е най-честият провал.
     try:
         data = json.loads(candidate)
     except json.JSONDecodeError as exc:
         raise ValueError(f"Отговорът не е валиден JSON: {exc}") from exc
 
+    # Стъпка 3: валидирай срещу очакваната pydantic схема — грешен тип/липсващо поле.
     try:
         return schema.model_validate(data)
     except ValidationError as exc:
@@ -150,6 +160,7 @@ def parse_structured(raw_text: str, schema: type[BaseModel]) -> BaseModel:
 
 
 def _extract_json_object(text: str) -> str:
+    """Намира първия балансиран `{ ... }` блок в суровия текст на модела."""
     text = text.strip()
     # премахни markdown fence, ако моделът е обвил отговора в ```json ... ```
     if "```" in text:
@@ -166,6 +177,8 @@ def _extract_json_object(text: str) -> str:
     if start == -1:
         raise ValueError("В отговора няма '{' — моделът вероятно не е върнал JSON.")
 
+    # Брои отваряща/затваряща скоба, за да намери КРАЯ на първия JSON обект — не просто
+    # първата "}", която би отрязала обекта по средата, ако вътре има вложени {}.
     depth = 0
     for idx in range(start, len(text)):
         if text[idx] == "{":

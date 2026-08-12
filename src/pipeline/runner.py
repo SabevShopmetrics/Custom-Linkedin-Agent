@@ -72,6 +72,12 @@ def run_pipeline(
     force: bool = False,
     knowledge: BrandKnowledge | None = None,
 ) -> PipelineResult:
+    """
+    Оркестрира всичките седем стъпки за една папка на пост (виж схемата в докстринга на
+    модула). Винаги връща PipelineResult с готово предложение — единствените изключения са
+    за вход (липсващ/нередактиран briefing.md) и инфраструктура (недостъпен модел),
+    хвърлени преди първото LLM извикване.
+    """
     log = setup_run_logger(post_dir)
     log.info("=== Ново пускане на конвейера за '%s' (force=%s) ===", post_dir, force)
 

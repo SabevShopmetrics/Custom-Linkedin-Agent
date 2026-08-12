@@ -354,3 +354,247 @@ def test_persistent_handler_is_removed_after_the_session(tmp_path):
 
     handlers = logging.getLogger(LOGGER_NAME).handlers
     assert not any(type(h).__name__ == "ProgressHandler" for h in handlers)
+
+
+# --------------------------------------------------------------------------- Ниво 0 (по-лесна употреба)
+# https://github.com — предложение от 2026-08-12: /wizard за нетехнически човек, снимки
+# без синтаксис, автоматично копиране в клипборда, еднократен .env bootstrap.
+
+
+def test_wizard_with_inline_brief_and_existing_attachment_asks_nothing(tmp_path):
+    """
+    Основната промяна от потребителска обратна връзка 2026-08-12: /wizard разпитваше за
+    повод/причина/кого-да-спомене/чувствителност/бележки едно по едно, и на практика не
+    се различаваше от обикновен чат промпт с формуляр отгоре. Сега '/wizard <бриф>' с
+    вече налична снимка не пита нищо — точно като свободен ред. Ако беше попитал нещо,
+    input_fn нямаше повече редове и run() щеше да свърши с EOFError преди generate.
+    """
+    photo = tmp_path / "a.jpg"
+    photo.write_bytes(b"x")
+    pipeline = FakePipeline()
+    repl, _ = make_repl(tmp_path, pipeline, [f"/attach {photo}", "/wizard Проведохме среща на 5 август"])
+
+    repl.run()
+
+    assert len(pipeline.calls) == 1
+    briefing = (pipeline.calls[0]["post_dir"] / "briefing.md").read_text(encoding="utf-8")
+    assert briefing.strip() == "Проведохме среща на 5 август"
+
+
+def test_wizard_without_argument_asks_what_happened_then_photos(tmp_path):
+    """Без снимки вече налични, /wizard пита две неща: повода, после снимки (Enter да пропусне)."""
+    pipeline = FakePipeline()
+    repl, _ = make_repl(tmp_path, pipeline, ["/wizard", "Нещо се случи", ""])
+
+    repl.run()
+
+    assert len(pipeline.calls) == 1
+    briefing = (pipeline.calls[0]["post_dir"] / "briefing.md").read_text(encoding="utf-8")
+    assert briefing.strip() == "Нещо се случи"
+
+
+def test_wizard_requires_a_non_empty_brief(tmp_path):
+    """Без повод няма за какво агентът да пише — не се създава папка."""
+    pipeline = FakePipeline()
+    repl, output = make_repl(tmp_path, pipeline, ["/wizard", ""])
+
+    repl.run()
+
+    assert pipeline.calls == []
+    assert any("празен" in line for line in output)
+
+
+def test_wizard_asks_for_photos_only_when_none_are_already_provided(tmp_path):
+    """
+    Единственото, което /wizard пита — снимки, и то само защото файлове по диска
+    наистина не могат да се познаят. Ако вече ги няма никакви, пита; ако вече има
+    (от /attach или @ в самия бриф), не пита втори път.
+    """
+    photo = tmp_path / "снимка.jpg"
+    photo.write_bytes(b"fake")
+    pipeline = FakePipeline()
+    repl, _ = make_repl(tmp_path, pipeline, ["/wizard Нещо се случи", str(photo)])
+
+    repl.run()
+
+    post_dir = pipeline.calls[0]["post_dir"]
+    assert (post_dir / "photos" / "снимка.jpg").exists()
+
+
+def test_wizard_reports_an_unresolvable_photo_path(tmp_path):
+    pipeline = FakePipeline()
+    repl, output = make_repl(tmp_path, pipeline, ["/wizard Нещо се случи", str(tmp_path / "няма.jpg")])
+
+    repl.run()
+
+    assert any("не намерена снимка" in line for line in output)
+
+
+def test_wizard_keeps_photos_already_staged_with_attach_and_skips_the_photo_question(tmp_path):
+    """
+    Бъг, поправен 2026-08-12: /wizard изхвърляше тихо снимки, вече прикачени с /attach
+    преди уизарда, и никога не изчистваше self.state.attachments след себе си. Сега,
+    като допълнение, наличието им означава и че въпросът за снимки изобщо не се задава.
+    """
+    staged = tmp_path / "staged.jpg"
+    staged.write_bytes(b"x")
+    pipeline = FakePipeline()
+    repl, _ = make_repl(tmp_path, pipeline, [f"/attach {staged}", "/wizard Нещо се случи"])
+
+    repl.run()
+
+    post_dir = pipeline.calls[0]["post_dir"]
+    assert (post_dir / "photos" / "staged.jpg").exists()
+    assert repl.state.attachments == []  # не изтича към следващ пост
+
+
+def test_wizard_recognizes_at_token_in_the_inline_argument(tmp_path):
+    """
+    Бъг, поправен 2026-08-12: `@път` в отговор на /wizard влизаше буквално в брифа
+    вместо да се разпознае като снимка — различно поведение от свободния ред, в
+    зависимост кой флоу човек ползва по навик.
+    """
+    photo = tmp_path / "екип.jpg"
+    photo.write_bytes(b"x")
+    pipeline = FakePipeline()
+    repl, _ = make_repl(tmp_path, pipeline, [f'/wizard Среща с екипа @"{photo}"'])
+
+    repl.run()
+
+    post_dir = pipeline.calls[0]["post_dir"]
+    briefing = (post_dir / "briefing.md").read_text(encoding="utf-8")
+    assert (post_dir / "photos" / "екип.jpg").exists()
+    assert "@" not in briefing
+
+
+def test_successful_post_is_copied_to_clipboard(tmp_path):
+    copied: list[str] = []
+    repl, output = make_repl(tmp_path, FakePipeline(), ["Бриф"])
+    repl.clipboard_fn = lambda text: (copied.append(text) or True)
+
+    repl.run()
+
+    assert copied == ["Готов пост."]
+    assert any("копирано в клипборда" in line for line in output)
+
+
+def test_clipboard_failure_does_not_break_the_session_or_claim_success(tmp_path):
+    repl, output = make_repl(tmp_path, FakePipeline(), ["Бриф"])
+    repl.clipboard_fn = lambda text: False
+
+    repl.run()  # не бива да хвърли изключение
+
+    assert not any("копирано в клипборда" in line for line in output)
+
+
+def test_interrupted_run_does_not_attempt_to_copy_an_empty_clipboard(tmp_path):
+    calls: list[str] = []
+    repl, _ = make_repl(tmp_path, FakePipeline(raises=BriefingMissingError("x")), ["Бриф"])
+    repl.clipboard_fn = lambda text: (calls.append(text) or True)
+
+    repl.run()
+
+    assert calls == []
+
+
+def test_env_setup_is_skipped_when_env_already_exists(tmp_path):
+    """Не бива да пита нищо, ако .env вече е там — иначе всяко старо пускане би питало отново."""
+    env_path = tmp_path / ".env"
+    env_path.write_text("EXISTING=1\n", encoding="utf-8")
+    example_path = tmp_path / ".env.example"
+    example_path.write_text("OPENWEBUI_API_KEY=\n", encoding="utf-8")
+    asked: list[str] = []
+
+    def input_fn(prompt: str) -> str:
+        asked.append(prompt)
+        raise EOFError
+
+    repl = Repl(
+        posts_dir=tmp_path / "posts",
+        out=lambda line: None,
+        input_fn=input_fn,
+        ink=Ink(enabled=False),
+        config_loader=make_config,
+        knowledge_loader=make_brand_knowledge,
+        client_factory=FakeClient,
+        pipeline_fn=FakePipeline(),
+        env_path=env_path,
+        env_example_path=example_path,
+    )
+
+    repl.run()
+
+    # Единственото извикване е нормалният промпт на главния цикъл ("› ") — ако env
+    # setup-ът се беше задействал, преди него щеше да има допълнителен въпрос.
+    assert asked == ["› "]
+    assert env_path.read_text(encoding="utf-8") == "EXISTING=1\n"
+
+
+def test_env_setup_writes_env_from_example_with_the_provided_key(tmp_path):
+    env_path = tmp_path / ".env"
+    example_path = tmp_path / ".env.example"
+    example_path.write_text("OPENWEBUI_API_KEY=\nMODEL_WRITER=some-model\n", encoding="utf-8")
+    output: list[str] = []
+    inputs = iter(["да", "tайна-стойност", ""])  # да създаде, ключ, после EOF в основния цикъл
+
+    def input_fn(_prompt: str) -> str:
+        try:
+            return next(inputs)
+        except StopIteration:
+            raise EOFError
+
+    repl = Repl(
+        posts_dir=tmp_path / "posts",
+        out=output.append,
+        input_fn=input_fn,
+        ink=Ink(enabled=False),
+        config_loader=make_config,
+        knowledge_loader=make_brand_knowledge,
+        client_factory=FakeClient,
+        pipeline_fn=FakePipeline(),
+        env_path=env_path,
+        env_example_path=example_path,
+    )
+
+    repl.run()
+
+    written = env_path.read_text(encoding="utf-8")
+    assert "OPENWEBUI_API_KEY=tайна-стойност" in written
+    assert "MODEL_WRITER=some-model" in written
+    assert any("Записан" in line for line in output)
+
+
+def test_env_setup_can_be_declined(tmp_path):
+    env_path = tmp_path / ".env"
+    example_path = tmp_path / ".env.example"
+    example_path.write_text("OPENWEBUI_API_KEY=\n", encoding="utf-8")
+    inputs = iter(["не"])
+
+    def input_fn(_prompt: str) -> str:
+        try:
+            return next(inputs)
+        except StopIteration:
+            raise EOFError
+
+    repl = Repl(
+        posts_dir=tmp_path / "posts",
+        out=lambda line: None,
+        input_fn=input_fn,
+        ink=Ink(enabled=False),
+        config_loader=make_config,
+        knowledge_loader=make_brand_knowledge,
+        client_factory=FakeClient,
+        pipeline_fn=FakePipeline(),
+        env_path=env_path,
+        env_example_path=example_path,
+    )
+
+    repl.run()
+
+    assert not env_path.exists()
+
+
+def test_split_path_args_supports_quoted_paths_with_spaces():
+    from src.repl import split_path_args
+
+    assert split_path_args('"C:\снимки папка\a.jpg" b.jpg') == ["C:\снимки папка\a.jpg", "b.jpg"]

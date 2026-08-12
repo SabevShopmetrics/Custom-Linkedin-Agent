@@ -14,7 +14,11 @@ import sys
 
 def force_utf8_io() -> None:
     """Пренасочва stdin/stdout/stderr към UTF-8, ако терминалът го поддържа."""
+    # stdin получава errors="replace" (лош байт → "?", сесията продължава); stdout/stderr
+    # нямат нужда от това, защото ние пишем валиден UTF-8, не четем непознат вход.
     for stream, errors in ((sys.stdin, "replace"), (sys.stdout, None), (sys.stderr, None)):
+        # reconfigure() липсва на потоци, пренасочени от файл/pipe в някои среди —
+        # прескачаме ги вместо да гръмнем.
         reconfigure = getattr(stream, "reconfigure", None)
         if reconfigure is None:
             continue

@@ -21,6 +21,31 @@ Media Picker → Критик → Ревизия → Консолидатор) �
 Нарочно НЕ се преизползва един LLMClient между промптите: неговият call_log влиза в
 output/meta.json, и споделен клиент би записал в meta.json на втория пост извикванията
 на първия. Един пост — един клиент — една чиста одитна следа.
+
+От 2026-08-12 („Ниво 0" на предложението за по-лесна употреба от нетехнически човек):
+
+  - Снимки — провлачен път в терминала се приема директно, без нужда от `/attach`
+    или `@`, на въпроса за снимки в `/wizard`.
+  - Готовият текст се копира автоматично в клипборда след всяко успешно генериране —
+    вместо ръчно маркиране в терминала. Best-effort: провал в копирането е тих (виж
+    copy_to_clipboard), никога не чупи сесията.
+  - Ако `.env` липсва изцяло, при старт се предлага еднократно създаване (само с
+    OPENWEBUI_API_KEY, останалото от `.env.example`) вместо изискване за ръчно
+    редактиране на файл, преди сесията изобщо да тръгне.
+
+От 2026-08-12, втора итерация (потребителска обратна връзка — първата версия на
+/wizard разпитваше за повод/причина/кого-да-спомене/чувствителност/бележки едно по
+едно и на практика не се различаваше от обикновен чат промпт с формуляр отгоре):
+
+  - `/wizard` вече пита само за снимки, и то само ако вече няма нито една — всичко
+    друго конвейерът вече решава сам (Планерът преценява чувствителност от текста,
+    Писателят вече отказва да измисля имена и минава на безопасно общо описание,
+    когато никой член няма потвърдено съгласие — виж render_sources_block в
+    pipeline/writer.py). Разпит преди всеки пост пазеше от риск, който кодът вече
+    пази сам; питането оставаше само инерция.
+  - Банерът при старт показва реални числа от заредения корпус (членове, еталонни
+    постове), не само име — за да е ясно от първия ред, че сесията не е празен чат,
+    а зареден с контекст за конкретна организация.
 """
 
 from __future__ import annotations
@@ -32,6 +57,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass, field
 from datetime import date
@@ -49,14 +75,19 @@ from src.pipeline.util import PHOTO_EXTENSIONS, list_photos, read_text_or_none
 from src.terminal import force_utf8_io, sanitize_input
 
 POSTS_DIR = Path("posts")
+ENV_PATH = Path(".env")
+ENV_EXAMPLE_PATH = Path(".env.example")
 PROMPT = "› "
 CONTINUATION_PROMPT = "  "
 
 HELP_TEXT = """\
-Пиши брифа на един ред и натисни Enter — агентът генерира поста.
+Пиши брифа на един ред и натисни Enter — агентът генерира поста. Нищо друго не пита:
+кого да спомене безопасно, чувствителен ли е постът, какъв тон да ползва — това си е
+негова работа, не твоя.
 Ред, завършващ с \\, продължава на следващия (за по-дълъг бриф).
-Снимка се прикачва с @път вътре в брифа или с /attach.
+Снимка се прикачва с @път вътре в брифа, с /attach, или просто я провлачи при /wizard.
 
+  /wizard [бриф]    като обикновен ред, но пита за снимки, ако още няма нито една
   /attach <път> …   прикачва снимка, папка със снимки или маска (*.jpg)
   /photos           показва прикаченото; /photos clear го изчиства
   /revise <текст>   пренаписва последния пост с допълнителна инструкция
@@ -127,10 +158,10 @@ def slugify(text: str, *, max_words: int = 5, max_length: int = 42) -> str:
     Прави от бриф на кирилица име на папка на латиница. Имената на папките се пишат в
     пътища, логове и meta.json — латиница ги прави безболезнени за копиране, git и shell.
     """
-    latin = "".join(_TRANSLIT.get(char, char) for char in text.lower())
-    words = re.findall(r"[a-z0-9]+", latin)
+    latin = "".join(_TRANSLIT.get(char, char) for char in text.lower())  # транслитерация буква по буква
+    words = re.findall(r"[a-z0-9]+", latin)  # маха пунктуация/интервали, взима само думи
     slug = "-".join(words[:max_words])[:max_length].strip("-")
-    return slug or "post"
+    return slug or "post"  # изцяло нетранслитерируем текст (само емоджи/символи) → "post"
 
 
 def unique_post_dir(posts_dir: Path, slug: str, *, today: date | None = None) -> Path:
@@ -139,7 +170,7 @@ def unique_post_dir(posts_dir: Path, slug: str, *, today: date | None = None) ->
     base = f"{stamp}-{slug}"
     candidate = posts_dir / base
     counter = 2
-    while candidate.exists():
+    while candidate.exists():  # втори пост същия ден със същия/подобен бриф → -2, -3, ...
         candidate = posts_dir / f"{base}-{counter}"
         counter += 1
     return candidate
@@ -163,6 +194,17 @@ def _expand_one(raw: str) -> list[Path]:
     return sorted(
         Path(match) for match in globlib.glob(expanded) if Path(match).suffix.lower() in PHOTO_EXTENSIONS
     )
+
+
+_QUOTED_OR_BARE_TOKEN = re.compile(r'"([^"]+)"|(\S+)')
+
+
+def split_path_args(text: str) -> list[str]:
+    """
+    Разбива една реплика на отделни пътища — поддържа "път с интервали" в кавички.
+    Споделено между /attach и /wizard (стъпката за снимки), за да приемат едно и също.
+    """
+    return [quoted or bare for quoted, bare in _QUOTED_OR_BARE_TOKEN.findall(text)]
 
 
 def resolve_attachments(args: Iterable[str]) -> tuple[list[Path], list[str]]:
@@ -258,6 +300,8 @@ class ProgressHandler(logging.Handler):
 
 @dataclass
 class SessionState:
+    """Каквото Repl помни между промптите в една терминална сесия — не преживява рестарт."""
+
     attachments: list[Path] = field(default_factory=list)
     post_dir: Path | None = None
     brief: str = ""
@@ -268,6 +312,10 @@ class SessionState:
 
 
 class Repl:
+    """Интерактивната сесия — виж докстринга на модула. Всички зависимости (модел, конфигурация,
+    knowledge loader, pipeline функция) са инжектирани през __init__ по подразбиране към реалните
+    им имплементации, за да могат тестовете да ги подменят без мрежа/диск."""
+
     def __init__(
         self,
         *,
@@ -279,6 +327,9 @@ class Repl:
         knowledge_loader: Callable[[], BrandKnowledge] = load_brand_knowledge,
         client_factory: Callable[[Config], LLMClient] = LLMClient,
         pipeline_fn: Callable[..., PipelineResult] = run_pipeline,
+        clipboard_fn: Callable[[str], bool] | None = None,
+        env_path: Path = ENV_PATH,
+        env_example_path: Path = ENV_EXAMPLE_PATH,
         today: date | None = None,
     ) -> None:
         self.posts_dir = posts_dir
@@ -289,6 +340,9 @@ class Repl:
         self.knowledge_loader = knowledge_loader
         self.client_factory = client_factory
         self.pipeline_fn = pipeline_fn
+        self.clipboard_fn = clipboard_fn or copy_to_clipboard
+        self.env_path = env_path
+        self.env_example_path = env_example_path
         self.today = today
 
         self.config: Config | None = None
@@ -299,6 +353,13 @@ class Repl:
     # ------------------------------------------------------------------ цикъл
 
     def run(self) -> int:
+        # Първо пускане без .env: предложи еднократно създаване, вместо да изискваш
+        # ръчно редактиране на файл, преди сесията изобщо да е започнала.
+        if not self.env_path.exists() and self.env_example_path.exists():
+            self._offer_env_setup()
+
+        # Конфигурация и корпус се зареждат ЕДНОКРАТНО тук — не при всеки промпт (виж
+        # докстринга на модула защо това е различно от `generate`).
         try:
             self.config = self.config_loader()
         except ConfigError as exc:
@@ -308,6 +369,8 @@ class Repl:
         self.knowledge = self.knowledge_loader()
         self._banner()
 
+        # ProgressHandler препраща логовете на конвейера към конзолата в реално време,
+        # докато е закачен — виж logging_utils.register_persistent_handler.
         handler = ProgressHandler(self.out, self.ink)
         register_persistent_handler(handler)
         try:
@@ -344,16 +407,54 @@ class Repl:
             parts.append(self.input_fn(self.ink.dim(CONTINUATION_PROMPT)))
         return sanitize_input("\n".join(part for part in parts).strip())
 
+    def _offer_env_setup(self) -> None:
+        """
+        Пита еднократно за OPENWEBUI_API_KEY и записва .env от .env.example — за да не се
+        изисква от нетехнически човек да отваря и редактира файл, преди сесията да тръгне.
+        Останалите настройки (модели, URL) остават каквито са в .env.example; който иска
+        друг модел, си остава свободен да редактира .env ръчно после.
+        """
+        answer = self.input_fn(self.ink.accent("Няма .env — да го създам ли сега? (Enter = да, 'не' за отказ) › "))
+        if answer.strip().lower() in {"не", "n", "no"}:
+            self.out(self.ink.dim("  Пропуснато — създай .env ръчно от .env.example, преди да продължиш."))
+            return
+
+        api_key = self.input_fn(self.ink.accent("  OPENWEBUI_API_KEY › ")).strip()
+        template = self.env_example_path.read_text(encoding="utf-8")
+        filled = re.sub(r"^OPENWEBUI_API_KEY=.*$", f"OPENWEBUI_API_KEY={api_key}", template, count=1, flags=re.MULTILINE)
+        self.env_path.write_text(filled, encoding="utf-8")
+        self.out(self.ink.ok(f"  ✓ Записан {self.env_path} — редактирайте го за друг модел/URL при нужда."))
+
     def _banner(self) -> None:
+        """
+        Показва какво агентът вече знае, преди първия въпрос — за да е ясно от първия
+        ред, че това не е празен ChatGPT прозорец, а зареден с корпуса на конкретна
+        организация. Без реални числа тук банерът е самò име и щеше да изглежда еднакво
+        с генеричен чат, независимо колко „умен" е самият конвейер отдолу.
+        """
         assert self.config is not None
-        self.out(self.ink.bold("LinkedIn агент — ИКТ Клъстер Варна"))
-        self.out(self.ink.dim(f"{self.config.openwebui_base_url} · писател: {self.config.model_writer}"))
-        self.out(self.ink.dim("/help за командите. Иначе просто напиши за какво е постът."))
+        assert self.knowledge is not None
+
+        org_name = "ИКТ Клъстер Варна"
+        if self.knowledge.facts:
+            org_name = self.knowledge.facts.get("organization", {}).get("name_bg") or org_name
+
+        self.out(self.ink.bold(f"LinkedIn агент — {org_name}"))
+        self.out(
+            self.ink.dim(
+                f"Заредено: {len(self.knowledge.members)} членове · "
+                f"{len(self.knowledge.good_examples)} еталонни поста · "
+                f"писател: {self.config.model_writer}"
+            )
+        )
+        self.out(self.ink.dim("Напиши едно изречение за какво е постът — останалото го решавам сам."))
+        self.out(self.ink.dim("(снимки: провлачи файл или @път; /help за всички команди)"))
         self.out("")
 
     # ------------------------------------------------------------------ команди
 
     def handle(self, line: str) -> None:
+        """Разпределя един въведен ред: обикновен текст → нов пост; `/име ...` → команда."""
         if not line.startswith("/"):
             self._new_post(line)
             return
@@ -363,6 +464,8 @@ class Repl:
         commands: dict[str, Callable[[str], None]] = {
             "help": self.cmd_help,
             "?": self.cmd_help,
+            "wizard": self.cmd_wizard,
+            "w": self.cmd_wizard,
             "attach": self.cmd_attach,
             "photos": self.cmd_photos,
             "revise": self.cmd_revise,
@@ -399,8 +502,7 @@ class Repl:
         if not argument:
             self.out(self.ink.err("Употреба: /attach <път до снимка, папка или маска>"))
             return
-        raw_args = [quoted or bare for quoted, bare in re.findall(r'"([^"]+)"|(\S+)', argument)]
-        found, unresolved = resolve_attachments(raw_args)
+        found, unresolved = resolve_attachments(split_path_args(argument))
         self.state.attachments.extend(found)
         if found:
             self.out(self.ink.ok(f"  + {len(found)} снимка(и); общо прикачени: {len(self.state.attachments)}"))
@@ -528,6 +630,8 @@ class Repl:
     # ------------------------------------------------------------------ генериране
 
     def _new_post(self, line: str) -> None:
+        """Един обикновен ред от потребителя → нова папка на диска + пускане на конвейера."""
+        # @път вътре в текста се изважда като снимка; неразпознат @токен си остава в брифа.
         brief, inline_photos, unresolved = extract_inline_attachments(line)
         for item in unresolved:
             self.out(self.ink.dim(f"  (@{item} не е съществуваща снимка — остава като текст в брифа)"))
@@ -535,13 +639,64 @@ class Repl:
             self.out(self.ink.err("Брифът е празен — опиши повода за поста."))
             return
 
+        # Снимки от /attach + снимки от @токени в реда — обединени в един списък за копиране.
         attachments = self.state.attachments + inline_photos
+        self.state.attachments.clear()
+        self._start_post(brief, attachments)
+
+    def cmd_wizard(self, argument: str = "") -> None:
+        """
+        `/wizard <бриф>` — точно като свободен ред, без разлика в третирането на текста
+        (същото @-разпознаване, същия конвейер), плюс ЕДНО нещо, което агентът наистина
+        не може да познае сам: файлове по диска. Пита за снимки само ако вече няма нито
+        една (нито /attach преди това, нито @токен в самия бриф) — иначе не пита нищо.
+
+        От 2026-08-12: премахнати въпросите „защо е важно" / „кого да споменем" /
+        „чувствителен ли е" / „бележки" — потребителска обратна връзка, че разпит преди
+        всеки пост го прави неразличим от обикновен чат промпт. Тези решения си ги взима
+        конвейерът сам: Планерът вече преценява чувствителност от самия текст на брифа;
+        Писателят вече отказва да измисля имена и споменава безопасно-общо, когато никой
+        член няма потвърдено съгласие (виж render_sources_block в pipeline/writer.py) —
+        тоест въпросът „кого да споменем" пазеше от риск, който кодът вече пази сам.
+        Ако искаш конкретно име в поста — просто го напиши в изречението, както винаги.
+        """
+        brief, inline_photos, unresolved = extract_inline_attachments(argument.strip())
+        for item in unresolved:
+            self.out(self.ink.dim(f"  (@{item} не е съществуваща снимка — остава като текст в брифа)"))
+
+        if not brief:
+            brief_raw = self.input_fn(self.ink.accent("  Какво се случи? › ")).strip()
+            brief, found, unresolved = extract_inline_attachments(brief_raw)
+            inline_photos.extend(found)
+            for item in unresolved:
+                self.out(self.ink.dim(f"  (@{item} не е съществуваща снимка — остава като текст в брифа)"))
+        if not brief:
+            self.out(self.ink.err("Брифът е празен — опиши повода за поста."))
+            return
+
+        attachments = list(self.state.attachments) + inline_photos
+        self.state.attachments.clear()
+
+        if not attachments:
+            # Единственото, което наистина не може да се познае — има ли файлове и къде са.
+            photos_raw = self.input_fn(
+                self.ink.dim("  Снимки — провлачи файл(ове) тук (Enter ако няма) › ")
+            ).strip()
+            if photos_raw:
+                found, missing = resolve_attachments(split_path_args(photos_raw))
+                attachments.extend(found)
+                for item in missing:
+                    self.out(self.ink.err(f"  ✗ не намерена снимка: {item}"))
+
+        self._start_post(brief, attachments)
+
+    def _start_post(self, brief: str, attachments: list[Path]) -> None:
+        """Общ край за нов пост — от свободен ред или от /wizard: папка, briefing.md, снимки, генериране."""
         post_dir = unique_post_dir(self.posts_dir, slugify(brief), today=self.today)
         post_dir.mkdir(parents=True, exist_ok=True)
         (post_dir / "briefing.md").write_text(brief + "\n", encoding="utf-8")
 
         copied = copy_attachments(attachments, post_dir / "photos")
-        self.state.attachments.clear()
         self.state.post_dir = post_dir
         self.state.brief = brief
         self.state.revisions = 0
@@ -550,7 +705,9 @@ class Repl:
         self._generate(post_dir, force=False)
 
     def _generate(self, post_dir: Path, *, force: bool) -> None:
+        """Пуска конвейера върху `post_dir` и отпечатва резултата/грешката. Общ път за нов пост, /again, /revise."""
         assert self.config is not None
+        # Нов клиент на всяко пускане — виж докстринга на модула защо (call_log в meta.json).
         client = self.client_factory(self.config)
         started = time.monotonic()
 
@@ -568,9 +725,16 @@ class Repl:
             self.out(self.ink.dim(f"  Пълен лог: {post_dir / 'run.log'} · /log го показва тук"))
             return
 
+        # Успешен път: конвейерът винаги стига дотук с готово предложение (виж runner.py) —
+        # печатаме текста, после резюме (статус/източници/брой извиквания/време), после
+        # всичко открито за преглед.
         elapsed = time.monotonic() - started
-        text = read_text_or_none(result.post_path) or ""
+        text = (read_text_or_none(result.post_path) or "").strip()
         self._print_post(text)
+
+        # Копиране в клипборда вместо ръчно маркиране от терминала — best-effort, тих провал.
+        if text and self.clipboard_fn(text):
+            self.out(self.ink.dim("  📋 копирано в клипборда"))
 
         merged = " + ".join(result.merged_from) or "?"
         status = self.ink.ok("✓ предложение") if result.status == "ready" else self.ink.warn("⚠ предложение с бележки")
@@ -604,6 +768,42 @@ def _open_in_file_manager(path: Path) -> None:
         subprocess.run(["open", str(path)], check=False)
     else:
         subprocess.run(["xdg-open", str(path)], check=False)
+
+
+def copy_to_clipboard(text: str) -> bool:
+    """
+    Копира текст в системния клипборд, без нова зависимост (pyperclip и др.) — всяка ОС
+    вече носи вграден инструмент за това. Връща дали е успяло; никога не хвърля изключение,
+    защото копирането е удобство, не част от резултата на конвейера (виж _generate).
+
+    На Windows вика PowerShell Set-Clipboard през временен UTF-8 файл, не `clip.exe`
+    директно — по-старите версии на `clip` презаписват кирилицата през грешен codepage.
+    """
+    try:
+        if sys.platform.startswith("win"):
+            with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False, encoding="utf-8") as handle:
+                handle.write(text)
+                temp_path = handle.name
+            try:
+                subprocess.run(
+                    [
+                        "powershell",
+                        "-NoProfile",
+                        "-Command",
+                        f"Set-Clipboard -Value (Get-Content -Raw -Encoding UTF8 '{temp_path}')",
+                    ],
+                    check=True,
+                    capture_output=True,
+                )
+            finally:
+                os.unlink(temp_path)
+        elif sys.platform == "darwin":
+            subprocess.run(["pbcopy"], input=text.encode("utf-8"), check=True)
+        else:
+            subprocess.run(["xclip", "-selection", "clipboard"], input=text.encode("utf-8"), check=True)
+        return True
+    except Exception:  # pragma: no cover — best-effort удобство, никога не бива да чупи сесията
+        return False
 
 
 def main() -> int:

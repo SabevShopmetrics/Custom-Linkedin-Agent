@@ -48,6 +48,8 @@ def _corrective_hint(error_text: str) -> str:
 
 @dataclass
 class CallLogEntry:
+    """Един запис за едно логическо извикване на LLMClient.complete() — влиза в output/meta.json."""
+
     role: str
     model: str
     duration_seconds: float
@@ -69,6 +71,13 @@ class CallLogEntry:
 
 
 class LLMClient:
+    """
+    Единствената точка за извикване на модел в цялата система. Всяка pipeline стъпка
+    вика `client.complete(Role.XXX, prompt, ...)` — never директно requests.post.
+    `call_log` натрупва CallLogEntry за всяко извикване в живота на този клиент; един
+    клиент трае за едно пускане на конвейера (виж src/repl.py защо не се преизползва).
+    """
+
     def __init__(
         self,
         config: Config,
@@ -104,6 +113,7 @@ class LLMClient:
         нужно е за кандидати с различна температура (process-4, стъпка 2). Ако и двете са
         None, параметърът не се изпраща изобщо.
         """
+        # 1. Кой модел за тази роля (от .env) + сглобяване на съобщенията (система+user, снимки при нужда).
         model = model_for_role(role, self._config)
         messages = self._build_messages(role, prompt, system=system, images=images)
 
@@ -113,13 +123,15 @@ class LLMClient:
 
         try:
             if schema is None:
+                # 2а. Без схема — просто суров текст, само мрежов retry (без валидация).
                 text, network_attempts, used_fallback = self._call_with_network_retry(
                     role, model, messages, temperature
                 )
                 self._log(role, model, started, success=True, attempts=network_attempts, used_fallback=used_fallback)
                 return text
 
-            # структуриран изход — валидация + поправящ retry
+            # 2б. Със схема — структуриран изход: всеки опит вика модела (с мрежов retry
+            # вътре), после пробва да парсира отговора по схемата.
             attempts_used = 0
             last_error: str | None = None
             current_messages = messages
@@ -137,6 +149,8 @@ class LLMClient:
                     )
                     return parsed
                 except ValueError as exc:
+                    # Невалиден JSON/схема — ако остават опити, добави отговора на модела
+                    # и поправящ промпт към историята на съобщенията и опитай пак.
                     last_error = str(exc)
                     if correction_attempt < max_correction_attempts:
                         current_messages = current_messages + [
@@ -151,6 +165,7 @@ class LLMClient:
                             },
                         ]
 
+            # Изчерпани всички поправящи опити — записва провала в лога и хвърля грешка.
             self._log(
                 role,
                 model,
@@ -189,6 +204,8 @@ class LLMClient:
             ("consolidator", self._config.model_consolidator),
             ("fallback", self._config.model_fallback),
         ]
+        # Всеки модел се пробва отделно, БЕЗ retry — искаме бърз диагностичен изглед кой е
+        # горе/долу, не устойчивост.
         for label, model in roles_and_models:
             started = self._clock()
             try:
@@ -218,6 +235,8 @@ class LLMClient:
             messages.append({"role": "system", "content": system})
 
         if images and supports_vision(role):
+            # Само ролята с vision поддръжка (Media Picker) получава снимки — OpenAI-стил
+            # "content" списък от текст + image_url части вместо чист низ.
             content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
             for image_path in images:
                 content.append({"type": "image_url", "image_url": {"url": self._encode_image(image_path)}})
@@ -248,13 +267,14 @@ class LLMClient:
         return f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"
 
     def _shrink_image(self, image_path: Path, data: bytes, limit: int) -> bytes:
+        """Намалява качество и после размер, докато снимката се събере под лимита (до 6 опита)."""
         try:
             from PIL import Image
         except ImportError as exc:  # pragma: no cover — зависимостта е декларирана в pyproject
             raise ImageTooLargeError(image_path.name, len(data), limit) from exc
 
         image = Image.open(io.BytesIO(data))
-        image = image.convert("RGB")
+        image = image.convert("RGB")  # PNG с алфа канал не може да се запише като JPEG директно
 
         quality = 85
         scale = 1.0
@@ -268,6 +288,7 @@ class LLMClient:
             candidate = buffer.getvalue()
             if len(candidate) <= limit:
                 return candidate
+            # Не се събра — първо режем качеството (по-евтино визуално), после размера.
             quality = max(40, quality - 15)
             scale = max(0.3, scale - 0.15)
 
@@ -283,6 +304,8 @@ class LLMClient:
         attempts = 0
         last_exc: Exception | None = None
 
+        # Опитва основния модел до model_max_retries пъти, с exponential backoff между
+        # опитите (1s, 2s, 4s, ...) — без изчакване след последния неуспешен опит.
         for attempt in range(self._config.model_max_retries):
             attempts += 1
             try:
@@ -300,6 +323,7 @@ class LLMClient:
             except Exception as exc:
                 last_exc = exc
 
+        # Нито основният, нито fallback моделът отговориха — цялата верига да гърми оттук.
         raise ModelUnavailableError(role.value, model, attempts, detail=str(last_exc) if last_exc else None)
 
     def _sampling_payload(self, temperature: float | None) -> dict[str, Any]:
@@ -323,6 +347,9 @@ class LLMClient:
     def _post_chat(
         self, model: str, messages: list[dict[str, Any]], temperature: float | None = None
     ) -> str:
+        # Единственото мрежово извикване в целия проект — стандартен OpenAI-съвместим
+        # chat/completions endpoint. raise_for_status() превръща 4xx/5xx в изключение,
+        # което _call_with_network_retry хваща и опитва пак/минава на fallback.
         response = requests.post(
             f"{self._config.openwebui_base_url}/chat/completions",
             headers={

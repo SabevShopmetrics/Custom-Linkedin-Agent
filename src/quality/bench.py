@@ -84,6 +84,8 @@ class PostAnalysis:
 
 @dataclass
 class BenchReport:
+    """Резултатът от collect() — референтната лента плюс анализ на всяко пускане в posts/."""
+
     reference: ReferenceBand | None
     posts: list[PostAnalysis] = field(default_factory=list)
 
@@ -169,11 +171,13 @@ def analyze_post_dir(post_dir: Path) -> PostAnalysis | None:
     """Мери едно пускане. Връща None, ако папката не съдържа поне първа чернова."""
     post_i = _read(post_dir / "post_i.md")
     if post_i is None:
-        return None
+        return None  # пускане, което не е стигнало дори до Post I — няма какво да се мери
 
     post_ii = _read(post_dir / "post_ii.md")
     official = _read(post_dir / "output" / "post.md")
 
+    # Измерва отделно всяка налична стъпка — липсваща стъпка (напр. няма Post II, защото
+    # Критикът не намери находки) просто отсъства от `stages`, не е грешка.
     stages: dict[str, TextMetrics] = {"post_i": measure(post_i)}
     if post_ii:
         stages["post_ii"] = measure(post_ii)
@@ -218,6 +222,8 @@ def collect(posts_dir: Path = Path("posts"), *, only: str | None = None) -> Benc
     (напр. `bench-`), за да може базова линия да се вземе само от контролирания набор
     брифове, а не от случайните пускания по време на работа.
     """
+    # Референтната лента идва от корпуса, не от posts/ — сравнението е "генерирано срещу
+    # реално публикувано", не "ново срещу старо генерирано".
     knowledge = load_brand_knowledge()
     report = BenchReport(reference=reference_band(knowledge.good_examples))
 
@@ -226,7 +232,7 @@ def collect(posts_dir: Path = Path("posts"), *, only: str | None = None) -> Benc
 
     for child in sorted(posts_dir.iterdir()):
         if not child.is_dir() or child.name.startswith("_"):
-            continue
+            continue  # "_example" е шаблон, не пускане
         if only and not child.name.startswith(only):
             continue
         analysis = analyze_post_dir(child)
@@ -240,6 +246,7 @@ def render(report: BenchReport, previous: dict[str, Any] | None = None) -> str:
     """Табличен изглед за терминала. `previous` е зареден по-стар отчет за сравнение."""
     lines: list[str] = []
 
+    # Блок 1: референтната лента (какво е "нормално" според корпуса).
     if report.reference:
         r = report.reference
         lines.append(
@@ -255,6 +262,7 @@ def render(report: BenchReport, previous: dict[str, Any] | None = None) -> str:
         lines.append("\nНяма пускания за анализ.")
         return "\n".join(lines)
 
+    # Блок 2: ред на пускане, показващ прехода Post I → Post II → предложение.
     lines.append("")
     lines.append(
         f"{'пускане':34}{'думи I→II→изх':>17}{'факти I→II→изх':>16}{'плътност изх':>14}{'празни изх':>12}{'мех.':>6}"
@@ -276,6 +284,7 @@ def render(report: BenchReport, previous: dict[str, Any] | None = None) -> str:
             f"{post.name[:33]:34}{words:>17}{facts:>16}{val('official','density'):>14}{empty:>12}{flag:>6}"
         )
 
+    # Блок 3: агрегирани медиани + двете ключови числа (виж aggregate()).
     agg = report.aggregate()
     lines.append("")
     lines.append("Медиани:")
@@ -342,12 +351,14 @@ def _render_comparison(current: dict[str, Any], previous: dict[str, Any]) -> str
 
 
 def save(report: BenchReport, path: Path) -> Path:
+    """Записва отчета като JSON — за по-късно сравнение през `--compare` (виж render/_render_comparison)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(report.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
     return path
 
 
 def load(path: Path) -> dict[str, Any] | None:
+    """Обратното на save() — None при липсващ или невалиден файл, никога изключение (CLI команда)."""
     if not path.exists():
         return None
     try:

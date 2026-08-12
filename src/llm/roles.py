@@ -12,6 +12,8 @@ from src.config import Config
 
 
 class Role(str, Enum):
+    """Логическа роля в конвейера — не име на модел. Виж _ROLE_TO_CONFIG_FIELD за съпоставянето."""
+
     PLANNER = "planner"
     WRITER = "writer"
     MEDIA = "media"

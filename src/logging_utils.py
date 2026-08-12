@@ -55,11 +55,13 @@ def setup_run_logger(post_dir: Path, *, console_level: int = logging.WARNING) ->
     """
     logger = logging.getLogger(LOGGER_NAME)
     logger.setLevel(logging.INFO)
-    logger.handlers.clear()
-    logger.propagate = False
+    logger.handlers.clear()  # изчиства предишни handler-и, за да не се дублират логове при повторно извикване
+    logger.propagate = False  # не изкачвай до root logger-а — иначе дублира извежданията му
 
     formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
 
+    # Файловият handler винаги пише пълна хронология на INFO ниво, независимо кой режим
+    # (CLI/REPL) вика функцията — mode="a", защото историята на опитите остава.
     post_dir.mkdir(parents=True, exist_ok=True)
     file_handler = logging.FileHandler(post_dir / "run.log", mode="a", encoding="utf-8")
     file_handler.setLevel(logging.INFO)
@@ -67,9 +69,12 @@ def setup_run_logger(post_dir: Path, *, console_level: int = logging.WARNING) ->
     logger.addHandler(file_handler)
 
     if _persistent_handlers:
+        # Интерактивният режим вече е закачил свой handler — той поема конзолата.
         for handler in _persistent_handlers:
             logger.addHandler(handler)
     else:
+        # Извън интерактивен режим (cli.py generate/check): обикновен handler на
+        # console_level, за да не се дублират print()-ите на самия cli.py.
         console_handler = logging.StreamHandler()
         console_handler.setLevel(console_level)
         console_handler.setFormatter(formatter)

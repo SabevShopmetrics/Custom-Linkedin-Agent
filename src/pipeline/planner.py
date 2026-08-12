@@ -44,10 +44,14 @@ docs/research-plans/research-plan-10-linkedin-post-craft.md): пост само 
 
 
 def run(post_dir: Path, client: LLMClient, brand_context: str, briefing_text: str, *, force: bool = False) -> PlanSchema:
+    """Извиква Планера и записва plan.json; пропуска извикването, ако файлът вече съществува (виж should_skip)."""
     plan_path = post_dir / "plan.json"
     if should_skip(plan_path, force=force):
+        # Възобновяемост: вече има план от предишно пускане — прочети го, не викай модел пак.
         return PlanSchema.model_validate(read_json(plan_path))
 
+    # Планерът не вижда самите снимки (няма vision) — само брой, за да прецени формат
+    # ("текст+снимка" срещу "само текст").
     photos = list_photos(post_dir / "photos")
     photo_note = f"В photos/ има {len(photos)} снимка(и)." if photos else "Папката photos/ е празна — няма снимки."
 
@@ -55,6 +59,6 @@ def run(post_dir: Path, client: LLMClient, brand_context: str, briefing_text: st
     system = SYSTEM_PROMPT_TEMPLATE.format(brand_context=brand_context or "(няма зареден brand контекст)")
 
     plan = client.complete(Role.PLANNER, prompt, system=system, schema=PlanSchema)
-    assert isinstance(plan, PlanSchema)
+    assert isinstance(plan, PlanSchema)  # schema=PlanSchema гарантира точно този тип, само за type checker-а
     write_json(plan_path, plan.model_dump())
     return plan

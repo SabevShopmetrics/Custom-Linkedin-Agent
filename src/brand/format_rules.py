@@ -82,14 +82,17 @@ def extract_emoji(text: str) -> list[str]:
 
 
 def find_hashtags(text: str) -> list[str]:
+    """Всички хаштагове в текста, напр. ['#ai', '#варна']."""
     return _HASHTAG_RE.findall(text)
 
 
 def find_urls(text: str) -> list[str]:
+    """Всички http(s):// и www. адреси в текста, с дубликати."""
     return _URL_RE.findall(text)
 
 
 def count_words(text: str) -> int:
+    """Брой думи по разделители — общата дефиниция, ползвана от formatting.py и quality/metrics.py."""
     return len([word for word in re.split(r"\s+", text.strip()) if word])
 
 
@@ -231,6 +234,9 @@ def parse_format_rules(
 
 
 def load_format_rules(knowledge_dir: Path, facts: dict[str, Any] | None = None) -> FormatRules:
+    """Чете tone.md/formats.md направо от диска и връща FormatRules — удобство за тестове/скриптове;
+    load_brand_knowledge() в brand/loader.py прави същото като част от пълното зареждане на корпуса."""
+
     def read(rel_path: str) -> str:
         path = knowledge_dir / rel_path
         return path.read_text(encoding="utf-8") if path.exists() else ""

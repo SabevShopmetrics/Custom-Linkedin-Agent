@@ -20,6 +20,8 @@ class ConfigError(Exception):
 
 @dataclass(frozen=True)
 class Config:
+    """Типизирана конфигурация от .env — резултатът от load_config(), подаван на LLMClient."""
+
     openwebui_base_url: str
     openwebui_api_key: str
 
@@ -69,11 +71,15 @@ def load_config(env_path: Path | None = None) -> Config:
 
     Хвърля ConfigError с ясен списък кои променливи липсват, вместо неясен KeyError.
     """
+    # override=False означава: ако променливата вече е в os.environ (напр. зададена от
+    # тестове или от shell), .env НЕ я презаписва.
     if env_path is not None:
         load_dotenv(dotenv_path=env_path, override=False)
     else:
         load_dotenv(override=False)
 
+    # Провери всички задължителни полета накуп и хвърли ЕДНА грешка със списъка от
+    # липсващи — вместо да гръмне на първото и човек да поправя .env на парчета.
     missing = [name for name in _REQUIRED_VARS if not os.environ.get(name)]
     if missing:
         raise ConfigError(
@@ -82,7 +88,11 @@ def load_config(env_path: Path | None = None) -> Config:
             + ". Копирайте .env.example на .env и попълнете стойностите."
         )
 
+    # --- малки помощници за парсване на числови настройки, дефинирани тук (не на модулно
+    # ниво), защото им трябва достъп до ConfigError с конкретното име на променливата
+
     def _int_env(name: str, default: int) -> int:
+        """Задължително цяло число с подразбиране, ако липсва; ConfigError при грешен формат."""
         raw = os.environ.get(name)
         if not raw:
             return default
@@ -92,12 +102,14 @@ def load_config(env_path: Path | None = None) -> Config:
             raise ConfigError(f"'{name}' в .env трябва да е цяло число, получено: '{raw}'") from exc
 
     def _optional_int_env(name: str) -> int | None:
+        """Празно/липсващо → None (виж коментара при Config.temperature защо е важно)."""
         raw = os.environ.get(name)
         if not raw or not raw.strip():
             return None
         return _int_env(name, 0)
 
     def _optional_float_env(name: str) -> float | None:
+        """Същото като _optional_int_env, но за число с плаваща запетая (TEMPERATURE)."""
         raw = os.environ.get(name)
         if not raw or not raw.strip():
             return None
@@ -106,6 +118,8 @@ def load_config(env_path: Path | None = None) -> Config:
         except ValueError as exc:
             raise ConfigError(f"'{name}' в .env трябва да е число, получено: '{raw}'") from exc
 
+    # Сглобява финалния обект — базовият URL се почиства от завършващо "/", за да не се
+    # получат двойни наклонени черти при конкатенация в llm/client.py.
     return Config(
         openwebui_base_url=os.environ["OPENWEBUI_BASE_URL"].rstrip("/"),
         openwebui_api_key=os.environ["OPENWEBUI_API_KEY"],

@@ -74,6 +74,7 @@ class TextMetrics:
 
 
 def find_numbers(text: str) -> list[str]:
+    """Всички числа в текста, като низове (за да пази форматирането: '30 000', '2026')."""
     return _NUMBER_RE.findall(text)
 
 
@@ -120,6 +121,8 @@ def find_proper_nouns(text: str) -> list[str]:
     def inside_quotes(position: int) -> bool:
         return any(start <= position < end for start, end in quoted_spans)
 
+    # Обхожда всяка дума извън кавичките и решава дали е начало на изречение (за да не
+    # брои обикновена главна буква след точка) — после дали е кандидат за собствено име.
     sentence_start = True
     for match in _WORD_RE.finditer(text):
         if inside_quotes(match.start()):
@@ -128,17 +131,18 @@ def find_proper_nouns(text: str) -> list[str]:
         before = text[: match.start()].rstrip()
 
         if not before:
-            starts_sentence = True
+            starts_sentence = True  # първата дума в текста
         elif before[-1] in ".!?…":
+            # точка/удивителна/въпросителна ПРЕДИ думата — освен ако е съкращение (д-р, бул.)
             starts_sentence = not _is_abbreviation_before(text, match.start())
         elif before[-1] == "\n" or "\n" in text[len(before) : match.start()]:
-            starts_sentence = True
+            starts_sentence = True  # нов ред/булет също се брои за начало
         else:
             starts_sentence = False
 
         sentence_start = starts_sentence
         first = word[0]
-        is_upper_word = len(word) > 1 and word.isupper()
+        is_upper_word = len(word) > 1 and word.isupper()  # версална дума (CONNEXUS) — винаги брои
         if is_upper_word or (first.isupper() and not sentence_start):
             found.append(word)
 
@@ -156,11 +160,14 @@ def _has_a_fact(fragment: str) -> bool:
 
 def measure(text: str) -> TextMetrics:
     """Всички метрики за един пост. Празен текст дава нули, не изключение."""
+    # Стъпка 1: суровите преброявания.
     words = count_words(text)
     sentences = split_sentences(text)
     proper_nouns = find_proper_nouns(text)
     numbers = find_numbers(text)
 
+    # Стъпка 2: изведените показатели върху тях — кои изречения нямат нито един факт,
+    # и дали първият ред (най-важният за LinkedIn — виж план 10) отваря с факт.
     empty = [sentence for sentence in sentences if not _has_a_fact(sentence)]
     first_line = next((line for line in text.splitlines() if line.strip()), "")
 

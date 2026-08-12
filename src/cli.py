@@ -7,7 +7,7 @@
 
 Команди:
   chat                             — същото като без команда: интерактивна сесия
-  generate <post_dir> [--force] [--brief "текст"]   — минава през шестте стъпки на конвейера
+  generate <post_dir> [--force] [--brief "текст"]   — минава през седемте стъпки на конвейера
                                                         (--brief пише директно briefing.md,
                                                         създава папката, ако не съществува —
                                                         без нужда от ръчно отваряне на файл)
@@ -40,11 +40,14 @@ EXAMPLE_DIR = POSTS_DIR / "_example"
 
 
 def cmd_generate(args: argparse.Namespace) -> int:
+    """Пуска конвейера за една папка. С --brief пише briefing.md вместо да го изисква готов."""
     post_dir = Path(args.post_dir)
     brief_text = getattr(args, "brief", None)
 
     force = args.force
 
+    # --brief е кратък път: пише briefing.md директно от команден ред, вместо `new` +
+    # ръчно редактиране на файл.
     if brief_text:
         # --brief замества нуждата от ръчно създаване/редактиране на briefing.md — папката
         # се създава при нужда, briefing.md се презаписва изрично с подадения текст.
@@ -69,10 +72,12 @@ def cmd_generate(args: argparse.Namespace) -> int:
     try:
         result = run_pipeline(post_dir, client, force=force)
     except AgentError as exc:
+        # Единствените изключения тук са за вход/инфраструктура — виж докстринга на runner.py.
         print(f"\n✗ Спряно: {exc.human_message}")
         print(f"Пълен лог: {post_dir / 'run.log'}")
         return 1
 
+    # Отвъд тази точка конвейерът винаги е успял — само печатаме резюме и открити въпроси.
     merged = ", ".join(result.merged_from) or "?"
     print(f"\n✓ Официалното предложение е в: {result.post_path} (от {merged})")
 
@@ -96,6 +101,7 @@ def cmd_generate(args: argparse.Namespace) -> int:
 
 
 def cmd_new(args: argparse.Namespace) -> int:
+    """Копира шаблона от posts/_example/ в posts/<name> — стартова точка за ръчно писане на бриф."""
     target = POSTS_DIR / args.name
     if target.exists():
         print(f"Грешка: '{target}' вече съществува.")
@@ -111,6 +117,7 @@ def cmd_new(args: argparse.Namespace) -> int:
 
 
 def cmd_check(_args: argparse.Namespace) -> int:
+    """Пробва всеки конфигуриран модел с минимален промпт — за диагностика преди реално пускане."""
     try:
         config = load_config()
     except ConfigError as exc:
@@ -134,8 +141,10 @@ def cmd_check(_args: argparse.Namespace) -> int:
 
 
 def cmd_check_knowledge(_args: argparse.Namespace) -> int:
+    """Отпечатва пълния одит на knowledge/ — кои файлове/полета липсват или са празни."""
     audit = audit_knowledge()
 
+    # Секция 1: статус на всеки markdown файл (OK / ПРАЗЕН / ЛИПСВА).
     print("knowledge/ — файлове:\n")
     for entry in audit["files"]:
         if not entry.exists:
@@ -146,6 +155,7 @@ def cmd_check_knowledge(_args: argparse.Namespace) -> int:
             status = "OK"
         print(f"  [{status:7}] {entry.path}")
 
+    # Секция 2: facts.yaml — кои полета съществуват, но са null (непотвърдени).
     print(f"\nidentity/facts.yaml наличен: {'да' if audit['facts_available'] else 'не'}")
     if audit["facts_null_fields"]:
         print("Непотвърдени (null) полета във facts.yaml:")
@@ -154,6 +164,7 @@ def cmd_check_knowledge(_args: argparse.Namespace) -> int:
     elif audit["facts_available"]:
         print("Всички полета във facts.yaml са попълнени.")
 
+    # Секция 3: членове — колко общо, колко с потвърдено съгласие за споменаване по име.
     print(
         f"\nmembers/members.yaml: {audit['members_count']} организации, "
         f"{audit['members_mentionable_count']} с потвърдено съгласие за споменаване "
@@ -169,6 +180,7 @@ def cmd_check_knowledge(_args: argparse.Namespace) -> int:
         for member in audit["members_with_notes"]:
             print(f"  - {member.get('name', '?')}: {member.get('notes')}")
 
+    # Секция 4: еталонни примери — дословни (влизат в промпта) срещу обобщения (не влизат).
     print(f"\nexamples/good/: {audit['good_examples_count']} дословни поста (еталон за подражание)")
     if audit["summary_examples_count"]:
         print(
@@ -177,6 +189,8 @@ def cmd_check_knowledge(_args: argparse.Namespace) -> int:
         )
     print(f"examples/bad/: {audit['bad_examples_count']} примера")
 
+    # Финалната присъда: и без пълен корпус конвейерът работи (връща 0 винаги, само
+    # предупреждава) — return code 1 тук би спрял CI/скриптове напразно.
     missing_or_empty = [e.path for e in audit["files"] if not e.usable]
     if missing_or_empty or not audit["facts_available"] or audit["members_count"] == 0:
         print(

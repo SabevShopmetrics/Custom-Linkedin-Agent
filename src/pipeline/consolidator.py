@@ -73,6 +73,8 @@ CLEANUP_SYSTEM_PROMPT = """\
 
 @dataclass
 class PipelineResult:
+    """Връщаната стойност на run_pipeline() — всичко, което CLI/REPL показват на човека след пускане."""
+
     status: str  # "ready" | "ready_with_notes" — конвейерът винаги стига до предложение
     output_dir: Path
     post_path: Path
@@ -104,9 +106,11 @@ def synthesize(
     merged_from = ["post_i.md"] + (["post_ii.md"] if second_post else [])
 
     if post_path.exists() and not force:
+        # Възобновяемост: предложението вече съществува от предишно пускане.
         return (read_text_or_none(post_path) or "").strip(), merged_from
 
     if second_post:
+        # Има Post II — истински синтез между двете версии, филтриран през находките.
         findings_text = "\n".join(f"- {finding}" for finding in findings) or "(няма изрични находки)"
         prompt = (
             f"Версия I:\n{first_post}\n\n"
@@ -116,6 +120,7 @@ def synthesize(
         )
         system = MERGE_SYSTEM_PROMPT
     else:
+        # Няма Post II (Критикът не намери какво да се запълва) — само механично чистене.
         prompt = first_post
         system = CLEANUP_SYSTEM_PROMPT
 
@@ -126,6 +131,7 @@ def synthesize(
 
 
 def _normalized(text: str) -> str:
+    """Нормализира whitespace за дословно сравнение — премахва разлики от форматиране, не съдържание."""
     return " ".join(text.split())
 
 
@@ -164,6 +170,8 @@ def finalize(
     post_path = output_dir / "post.md"
     meta_path = output_dir / "meta.json"
 
+    # Копира само физически съществуващите файлове; несъвпадащо име (модел си измисля
+    # файл, който не съществува) отива в missing, не гърми.
     selected_dir = output_dir / "selected"
     selected_dir.mkdir(parents=True, exist_ok=True)
     copied: list[str] = []
@@ -176,6 +184,8 @@ def finalize(
         else:
             missing.append(item.filename)
 
+    # Пълната одитна следа за човека: статус, всичко останало открито, планът, снимките,
+    # и лог на всяко LLM извикване (роля, модел, време, успех) от текущия клиент.
     meta = {
         "status": status,
         "open_notes": open_notes or [],

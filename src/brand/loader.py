@@ -72,9 +72,11 @@ _AUDITED_FILES = [path for path, _ in _MARKDOWN_SECTIONS]
 
 @dataclass
 class KnowledgeAudit:
+    """Статус на един файл от knowledge/ — за check-knowledge и за реда какво реално да се сверява."""
+
     path: str
     exists: bool
-    empty: bool  # съществува, но е празен/само whitespace, или YAML е {}/[]
+    empty: bool  # съществува, но е празен/само whitespace/само HTML коментари, или YAML е {}/[]
 
     @property
     def usable(self) -> bool:
@@ -83,6 +85,8 @@ class KnowledgeAudit:
 
 @dataclass
 class BrandKnowledge:
+    """Целият заредена корпус — резултатът от load_brand_knowledge(), подаван на всяка pipeline стъпка."""
+
     stable_context: str
     facts: dict[str, Any] | None
     facts_available: bool
@@ -183,6 +187,14 @@ def _load_examples(examples_dir: Path) -> tuple[list[str], list[str]]:
 
 
 def load_brand_knowledge(knowledge_dir: Path = DEFAULT_KNOWLEDGE_DIR) -> BrandKnowledge:
+    """
+    Чете целия корпус (identity/voice/rules/strategy текстове, facts.yaml, members.yaml,
+    examples/) и сглобява stable_context — единственият системен промпт-фрагмент, който
+    Планер/Писател/Критик получават за организацията. Липсващ или празен файл не гърми,
+    само не влиза в резултата (виж KnowledgeAudit по-горе).
+    """
+    # Стъпка 1: markdown секциите (about/history/tone/formats/...) — реда в _MARKDOWN_SECTIONS
+    # определя реда в промпта; само usable файлове (виж strip_comments) влизат в blocks.
     audit = _audit_markdown(knowledge_dir)
 
     blocks: list[str] = []
@@ -190,12 +202,14 @@ def load_brand_knowledge(knowledge_dir: Path = DEFAULT_KNOWLEDGE_DIR) -> BrandKn
         if knowledge_audit.usable:
             blocks.append(f"## {title}\n\n{_read_text(knowledge_dir / rel_path)}")
 
+    # Стъпка 2: identity/facts.yaml — машинно проверимите факти (ЕИК, адрес, програми...).
     facts_raw = _load_yaml(knowledge_dir / "identity/facts.yaml")
     facts_available = facts_raw is not None
     audit.append(
         KnowledgeAudit(path="identity/facts.yaml", exists=(knowledge_dir / "identity/facts.yaml").exists(), empty=not facts_available)
     )
 
+    # Стъпка 3: members/members.yaml — списъкът членове, вкл. mention_allowed за GDPR проверката.
     members_raw = _load_yaml(knowledge_dir / "members/members.yaml") or {}
     members = members_raw.get("members") or [] if isinstance(members_raw, dict) else []
     audit.append(
@@ -206,6 +220,8 @@ def load_brand_knowledge(knowledge_dir: Path = DEFAULT_KNOWLEDGE_DIR) -> BrandKn
         )
     )
 
+    # Стъпка 4: еталонни примери — разделени на дословни (влизат в промпта) и обобщения
+    # (само за одит, виж _load_examples и докстринга на модула, правило 2).
     good_examples, summary_examples = _load_examples(knowledge_dir / "examples/good")
     bad_examples, _ = _load_examples(knowledge_dir / "examples/bad")
     audit.append(KnowledgeAudit(path="examples/good/", exists=True, empty=len(good_examples) == 0))
@@ -220,6 +236,7 @@ def load_brand_knowledge(knowledge_dir: Path = DEFAULT_KNOWLEDGE_DIR) -> BrandKn
             f"{examples_text}"
         )
 
+    # Стъпка 5: сглобяване на финалния системен промпт-фрагмент от всички секции по-горе.
     stable_context = "\n\n".join(blocks)
 
     facts = facts_raw if isinstance(facts_raw, dict) else None
@@ -248,6 +265,7 @@ def find_null_paths(data: Any, prefix: str = "") -> list[str]:
     """
     paths: list[str] = []
     if data is None:
+        # Базов случай на рекурсията — стигнахме до самата null стойност, връщаме пътя до нея.
         return [prefix] if prefix else []
 
     if isinstance(data, dict):
@@ -257,6 +275,7 @@ def find_null_paths(data: Any, prefix: str = "") -> list[str]:
     elif isinstance(data, list):
         for idx, item in enumerate(data):
             paths.extend(find_null_paths(item, f"{prefix}[{idx}]"))
+    # друг тип (str/int/bool/...) — има стойност, не е null, нищо не се добавя
 
     return paths
 

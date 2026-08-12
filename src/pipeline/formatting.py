@@ -38,6 +38,8 @@ _DIGIT_RE = re.compile(r"\d")
 
 @dataclass
 class FormattingResult:
+    """Резултатът от enforce() — поправеният текст плюс одитна следа какво е пипнато и защо."""
+
     text: str
     fixes: list[str] = field(default_factory=list)  # какво кодът е поправил сам
     notes: list[str] = field(default_factory=list)  # какво остава за човека/следващ пост
@@ -57,6 +59,7 @@ def _tidy(text: str) -> str:
 
 
 def _strip_hashtags(text: str, fixes: list[str]) -> str:
+    """Маха всеки хаштаг и добавя запис в `fixes` — гласът на клъстера не ги ползва (tone.md)."""
     hashtags = find_hashtags(text)
     if not hashtags:
         return text
@@ -67,6 +70,7 @@ def _strip_hashtags(text: str, fixes: list[str]) -> str:
 
 
 def _strip_disallowed_emoji(text: str, rules: FormatRules, fixes: list[str]) -> str:
+    """Маха всяко емоджи извън rules.allowed_emoji — независимо от бройката, само от разрешеността."""
     disallowed = [char for char in extract_emoji(text) if char not in rules.allowed_emoji]
     if not disallowed:
         return text
@@ -151,13 +155,14 @@ def enforce(text: str, rules: FormatRules, *, brief_text: str = "") -> Formattin
     notes: list[str] = []
     working = text
 
+    # --- първо: автоматични поправки, приложени в ред (всяка мутира `working`)
     if rules.hashtags_forbidden:
         working = _strip_hashtags(working, fixes)
     if rules.enforces_emoji:
         working = _strip_disallowed_emoji(working, rules, fixes)
         working = _trim_excess_emoji(working, rules, fixes)
     working = _replace_unknown_urls(working, rules, brief_text, fixes)
-    working = _tidy(working)
+    working = _tidy(working)  # последно — маха следите от всички изтривания по-горе
 
     # --- нататък само констатации: поправката им е писане, не чистене
     words = count_words(working)

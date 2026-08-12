@@ -32,6 +32,8 @@ class AgentError(Exception):
     """Базова грешка на агента. Винаги носи човешко обяснение."""
 
     def __init__(self, human_message: str, *, detail: str | None = None) -> None:
+        # human_message е това, което CLI/REPL показват директно на човека; detail (ако
+        # има) е техническата подробност (суров HTTP/JSON текст) — отива само в лога.
         self.human_message = human_message
         self.detail = detail
         super().__init__(human_message if not detail else f"{human_message}\n({detail})")

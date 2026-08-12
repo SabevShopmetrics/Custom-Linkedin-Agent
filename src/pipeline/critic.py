@@ -164,11 +164,19 @@ def run(
     filename: str = "critique.md",
     force: bool = False,
 ) -> CritiqueSchema:
+    """
+    Извиква Критика върху `draft_text` и записва резултата в `filename`. Ползва се два пъти
+    в runner.py: върху Post I (critique.md, стъпка 4, находките хранят Post II) и върху
+    официалното предложение (critique_final.md, стъпка 7, чисто информативно).
+    """
     critique_path = post_dir / filename
     if should_skip(critique_path, force=force):
+        # Възобновяемост: вече има записана критика — препрочети вградения JSON блок.
         existing = read_text_or_none(critique_path) or ""
         return _parse_critique_markdown(existing)
 
+    # Критикът вижда ВСИЧКИ членове (за разлика от Писателя) — трябва да може да хване
+    # споменаване на организация без потвърдено съгласие.
     facts_block = _render_facts_block(knowledge)
     members_block = _render_members_block(knowledge)
 
@@ -186,6 +194,8 @@ def run(
     critique = client.complete(Role.CRITIC, prompt, system=system, schema=CritiqueSchema)
     assert isinstance(critique, CritiqueSchema)
 
+    # Детерминираните GDPR проверки на код ниво идват СЛЕД LLM отговора и мутират
+    # критиката — независимо какво е решил моделът (виж докстринга на функцията).
     enforce_code_level_rules(critique, draft_text, briefing_text, knowledge.members)
 
     write_text(critique_path, _render_critique_markdown(critique))
@@ -193,6 +203,7 @@ def run(
 
 
 def _render_facts_block(knowledge: BrandKnowledge) -> str:
+    """facts.yaml дословно като YAML в промпта на Критика, или изрична бележка, че липсва."""
     if not knowledge.facts_available or not knowledge.facts:
         return (
             "## FACTS.YAML\n\n"
@@ -204,6 +215,7 @@ def _render_facts_block(knowledge: BrandKnowledge) -> str:
 
 
 def _render_members_block(knowledge: BrandKnowledge) -> str:
+    """Пълният списък членове + mention_allowed за всеки — Критикът трябва да ги вижда всичките."""
     if not knowledge.members:
         return "## MEMBERS.YAML\n\nmembers.yaml липсва или е празен — не сверявай членове срещу него."
     lines = [
@@ -236,6 +248,7 @@ def enforce_code_level_rules(
     violations = list(critique.rule_violations)
     lower_draft = draft_text.lower()
 
+    # Проверка 1: организация, спомената в текста, чието mention_allowed не е true.
     for member in members:
         name = member.get("name")
         if not name or member.get("mention_allowed") is True:
@@ -253,6 +266,7 @@ def enforce_code_level_rules(
                 )
                 break  # един violation на организация е достатъчен, не дублирай за всеки вариант
 
+    # Проверка 2: низ, който прилича на лично име (виж _NAME_PATTERN), но не е дословно в брифа.
     for match in _NAME_PATTERN.finditer(draft_text):
         candidate = match.group(0)
         if candidate not in briefing_text:
@@ -261,6 +275,7 @@ def enforce_code_level_rules(
             )
 
     critique.rule_violations = violations
+    # "forbidden" винаги вдига HARD_REJECT; "gdpr" никога — виж докстринга на модула защо.
     has_blocking_violation = any(v.rule != "gdpr" for v in critique.rule_violations)
 
     if has_blocking_violation:
@@ -313,6 +328,7 @@ def collect_findings(critique: CritiqueSchema) -> list[str]:
     """
     findings: list[str] = []
 
+    # Ред 1: нарушени правила — най-сериозното, трябва да отпадне напълно.
     for violation in critique.rule_violations:
         if violation.rule == "gdpr":
             findings.append(
@@ -323,11 +339,14 @@ def collect_findings(critique: CritiqueSchema) -> list[str]:
                 f"Нарушено правило от rules/forbidden.md — трябва да отпадне НАПЪЛНО: {violation.detail}"
             )
 
+    # Ред 2: обобщената препоръка на Критика — често вече съдържа посоката на решение.
     if critique.summary:
         findings.append(f"Препоръка на Критика: {critique.summary}")
 
+    # Ред 3: тонови проблеми, дословно от Критика.
     findings.extend(critique.tone_issues)
 
+    # Ред 4: недоказани твърдения — последни, защото поправката им е най-евтина (махни/провери).
     for fact in critique.facts:
         if fact.source is FactSource.UNVERIFIED:
             findings.append(
@@ -339,6 +358,7 @@ def collect_findings(critique: CritiqueSchema) -> list[str]:
 
 
 def _render_critique_markdown(critique: CritiqueSchema) -> str:
+    """Човекочетим critique.md с вграден machine-readable JSON блок за _parse_critique_markdown."""
     facts_block = "\n".join(f"- \"{f.claim}\" — {f.source.value} ({f.note})" for f in critique.facts) or "(няма)"
     tone_block = "\n".join(f"- {issue}" for issue in critique.tone_issues) or "(няма)"
     rules_block = "\n".join(f"- [{v.rule}] {v.detail}" for v in critique.rule_violations) or "(няма)"
@@ -373,6 +393,7 @@ def load_critique(path: Path) -> CritiqueSchema | None:
 
 
 def _parse_critique_markdown(text: str) -> CritiqueSchema:
+    """Обратното на _render_critique_markdown — препрочита вградения JSON при skip/load_critique."""
     match = _JSON_BLOCK_RE.search(text)
     if not match:
         raise ValueError("critique файлът не съдържа очаквания вграден JSON блок за препрочитане.")

@@ -49,20 +49,29 @@ def run(
     *,
     force: bool = False,
 ) -> tuple[MediaSelectionSchema, bool]:
+    """
+    Избира снимки от photos/ и записва media.json. Връща (избор, no_photos) — вторият
+    елемент е True, когато папката е била празна, за да runner.py логне предупреждение
+    без да препрочита файловата система.
+    """
     media_path = post_dir / "media.json"
     photos = list_photos(post_dir / "photos")
     no_photos = len(photos) == 0
 
     if should_skip(media_path, force=force):
+        # Възобновяемост: вече има избор от предишно пускане.
         return MediaSelectionSchema.model_validate(read_json(media_path)), no_photos
 
     if no_photos:
+        # Празна папка не е грешка — просто няма какво да се избира, пропуска се LLM извикването.
         warning = NoPhotosWarning(str(post_dir))
         get_logger().info(warning.human_message)  # runner.py логва и на WARNING ниво в общия ход на run-а
         selection = MediaSelectionSchema(selected=[])
         write_json(media_path, selection.model_dump())
         return selection, True
 
+    # Единствената роля с vision — снимките отиват директно в заявката към модела (виж
+    # llm/client.py::_build_messages и supports_vision в llm/roles.py).
     system = SYSTEM_PROMPT_TEMPLATE.format(max_photo_count=plan.max_photo_count)
     prompt = (
         f"Бриф за повода:\n{briefing_text}\n\n"

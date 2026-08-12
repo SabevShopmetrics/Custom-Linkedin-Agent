@@ -89,6 +89,8 @@ def render_sources_block(knowledge: BrandKnowledge) -> str:
     членове е обърнат: Критикът вижда всички (за да ги хване), Писателят вижда само тези с
     потвърдено съгласие. Име, което не е пред очите му, е име, което няма да сложи.
     """
+    # Блок 1: facts.yaml дословно като YAML — програми, адрес, ЕИК и т.н. Ако липсва,
+    # изричен ред казва на модела да не разчита на нищо извън брифа.
     if knowledge.facts_available and knowledge.facts:
         facts_yaml = yaml.safe_dump(knowledge.facts, allow_unicode=True, sort_keys=False)
         facts_block = f"## ФАКТИ ЗА ОРГАНИЗАЦИЯТА (identity/facts.yaml)\n\n```yaml\n{facts_yaml}```"
@@ -98,6 +100,8 @@ def render_sources_block(knowledge: BrandKnowledge) -> str:
             "facts.yaml липсва или е празен — брифът е единственият ти източник за факти."
         )
 
+    # Блок 2: само членовете с mention_allowed: true — обратно на critic.py, който вижда
+    # всички (за да хване неразрешено споменаване).
     mentionable = [
         str(member.get("name", "")).strip()
         for member in knowledge.members
@@ -165,10 +169,13 @@ def write_first_draft(
     *,
     force: bool = False,
 ) -> str:
+    """Пише Post I (стъпка 2) — първата пълноценна чернова на поста по плана и брифа."""
     draft_path = post_dir / "post_i.md"
     if should_skip(draft_path, force=force):
+        # Възобновяемост: вече има чернова от предишно пускане.
         return read_text_or_none(draft_path) or ""
 
+    # Системният промпт носи корпуса + факти/членове + плана; брифът остава чист user prompt.
     system = DRAFT_SYSTEM_PROMPT_TEMPLATE.format(
         brand_context=knowledge.stable_context or "(няма зареден brand контекст)",
         sources_block=render_sources_block(knowledge),
@@ -178,7 +185,7 @@ def write_first_draft(
         notes=plan.notes or "(няма)",
     )
     text = client.complete(Role.WRITER, briefing_text, system=system)
-    assert isinstance(text, str)
+    assert isinstance(text, str)  # без schema=, complete() винаги връща str тук
     write_text(draft_path, text.strip() + "\n")
     return text
 
@@ -198,8 +205,11 @@ def write_second_post(
     """Втори пост по същия повод, който запълва находките на Критика върху първия."""
     second_path = post_dir / output_filename
     if should_skip(second_path, force=force):
+        # Възобновяемост: вече има Post II от предишно пускане.
         return read_text_or_none(second_path) or ""
 
+    # User промптът носи цялата верига: оригинален бриф + Post I + находките на Критика,
+    # форматирани като списък със задачи за запълване.
     findings_text = "\n".join(f"- {finding}" for finding in findings) or "(няма изрични находки)"
     prompt = (
         f"Оригинален бриф:\n{briefing_text}\n\n"
