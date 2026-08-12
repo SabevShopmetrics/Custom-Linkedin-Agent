@@ -44,7 +44,7 @@ def test_writer_skips_when_post_i_exists(tmp_path):
         post_type="x", format="y", tone="z", needs_photos=False, max_photo_count=0, is_sensitive=False
     )
 
-    result = writer.write_first_draft(post_dir, StubClient(), "", plan, "бриф", force=False)
+    result = writer.write_first_draft(post_dir, StubClient(), make_brand_knowledge(), plan, "бриф", force=False)
 
     assert result == "вече написан текст"
 

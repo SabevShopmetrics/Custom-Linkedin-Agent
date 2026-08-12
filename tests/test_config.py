@@ -82,3 +82,53 @@ def test_non_numeric_timeout_raises_clear_error(monkeypatch, tmp_path):
 
     with pytest.raises(ConfigError, match="REQUEST_TIMEOUT_SECONDS"):
         load_config(env_path=env_file)
+
+
+# --------------------------------------------------------------- план 11, Фаза 1
+# Празна стойност за параметър на извадката значи „не се изпраща" — не 0 и не грешка.
+# Иначе `SEED=` в .env би сменил поведението на веригата, вместо да го остави каквото е.
+
+
+def _set_required(monkeypatch):
+    """Минимално валидна конфигурация през env променливи (те бият .env, override=False)."""
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("OPENWEBUI_BASE_URL", "https://example.test")
+    monkeypatch.setenv("OPENWEBUI_API_KEY", "key")
+    for role in ("PLANNER", "WRITER", "MEDIA", "CRITIC", "CONSOLIDATOR", "FALLBACK"):
+        monkeypatch.setenv(f"MODEL_{role}", f"{role.lower()}-model")
+
+
+def test_empty_sampling_params_load_as_none(monkeypatch):
+    _set_required(monkeypatch)
+    monkeypatch.setenv("SEED", "")
+    monkeypatch.setenv("TEMPERATURE", "  ")
+    monkeypatch.setenv("MAX_TOKENS", "")
+
+    config = load_config()
+
+    assert config.seed is None
+    assert config.temperature is None
+    assert config.max_tokens is None
+
+
+def test_sampling_params_are_parsed_when_set(monkeypatch):
+    _set_required(monkeypatch)
+    monkeypatch.setenv("SEED", "42")
+    monkeypatch.setenv("TEMPERATURE", "0.75")
+    monkeypatch.setenv("MAX_TOKENS", "900")
+
+    config = load_config()
+
+    assert config.seed == 42
+    assert config.temperature == 0.75
+    assert config.max_tokens == 900
+
+
+def test_non_numeric_temperature_is_a_clear_config_error(monkeypatch):
+    _set_required(monkeypatch)
+    monkeypatch.setenv("TEMPERATURE", "топло")
+
+    with pytest.raises(ConfigError) as exc:
+        load_config()
+
+    assert "TEMPERATURE" in str(exc.value)

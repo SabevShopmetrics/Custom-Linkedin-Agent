@@ -17,7 +17,7 @@ from __future__ import annotations
 import base64
 import io
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
@@ -91,6 +91,7 @@ class LLMClient:
         system: str | None = None,
         images: list[Path] | None = None,
         schema: type[BaseModel] | None = None,
+        temperature: float | None = None,
     ) -> str | BaseModel:
         """
         Извиква модела, конфигуриран за `role`.
@@ -98,6 +99,10 @@ class LLMClient:
         Ако `schema` е подадена, отговорът се валидира и се връща инстанция на схемата;
         при невалиден изход се прави поправящ retry (максимум `invalid_response_max_retries`
         допълнителни опита), преди да гръмне InvalidResponseError.
+
+        `temperature` презаписва стойността от конфигурацията само за това извикване —
+        нужно е за кандидати с различна температура (process-4, стъпка 2). Ако и двете са
+        None, параметърът не се изпраща изобщо.
         """
         model = model_for_role(role, self._config)
         messages = self._build_messages(role, prompt, system=system, images=images)
@@ -108,7 +113,9 @@ class LLMClient:
 
         try:
             if schema is None:
-                text, network_attempts, used_fallback = self._call_with_network_retry(role, model, messages)
+                text, network_attempts, used_fallback = self._call_with_network_retry(
+                    role, model, messages, temperature
+                )
                 self._log(role, model, started, success=True, attempts=network_attempts, used_fallback=used_fallback)
                 return text
 
@@ -119,7 +126,7 @@ class LLMClient:
             max_correction_attempts = self._config.invalid_response_max_retries
 
             for correction_attempt in range(max_correction_attempts + 1):
-                text, net_attempts, fb = self._call_with_network_retry(role, model, current_messages)
+                text, net_attempts, fb = self._call_with_network_retry(role, model, current_messages, temperature)
                 network_attempts += net_attempts
                 used_fallback = used_fallback or fb
                 attempts_used += 1
@@ -267,7 +274,7 @@ class LLMClient:
         raise ImageTooLargeError(image_path.name, len(candidate), limit)
 
     def _call_with_network_retry(
-        self, role: Role, model: str, messages: list[dict[str, Any]]
+        self, role: Role, model: str, messages: list[dict[str, Any]], temperature: float | None = None
     ) -> tuple[str, int, bool]:
         """
         Retry с нарастващо изчакване на основния модел, после един опит с fallback модела.
@@ -279,7 +286,7 @@ class LLMClient:
         for attempt in range(self._config.model_max_retries):
             attempts += 1
             try:
-                return self._post_chat(model, messages), attempts, False
+                return self._post_chat(model, messages, temperature), attempts, False
             except Exception as exc:  # мрежов/модел проблем — опитваме пак
                 last_exc = exc
                 if attempt < self._config.model_max_retries - 1:
@@ -289,20 +296,40 @@ class LLMClient:
         if model != self._config.model_fallback:
             attempts += 1
             try:
-                return self._post_chat(self._config.model_fallback, messages), attempts, True
+                return self._post_chat(self._config.model_fallback, messages, temperature), attempts, True
             except Exception as exc:
                 last_exc = exc
 
         raise ModelUnavailableError(role.value, model, attempts, detail=str(last_exc) if last_exc else None)
 
-    def _post_chat(self, model: str, messages: list[dict[str, Any]]) -> str:
+    def _sampling_payload(self, temperature: float | None) -> dict[str, Any]:
+        """
+        Параметрите на извадката, включени в заявката САМО когато са зададени.
+
+        Празен резултат значи „както досега" — доставчикът решава. Това е нарочно: сегашната
+        верига е измерена с точно това поведение (20 реални пускания) и добавянето на
+        настройка не бива тихо да го смени. Виж src/config.py и план 11, находка 2.7.
+        """
+        payload: dict[str, Any] = {}
+        effective_temperature = temperature if temperature is not None else self._config.temperature
+        if effective_temperature is not None:
+            payload["temperature"] = effective_temperature
+        if self._config.seed is not None:
+            payload["seed"] = self._config.seed
+        if self._config.max_tokens is not None:
+            payload["max_tokens"] = self._config.max_tokens
+        return payload
+
+    def _post_chat(
+        self, model: str, messages: list[dict[str, Any]], temperature: float | None = None
+    ) -> str:
         response = requests.post(
             f"{self._config.openwebui_base_url}/chat/completions",
             headers={
                 "Authorization": f"Bearer {self._config.openwebui_api_key}",
                 "Content-Type": "application/json",
             },
-            json={"model": model, "messages": messages},
+            json={"model": model, "messages": messages, **self._sampling_payload(temperature)},
             timeout=self._config.request_timeout_seconds,
         )
         response.raise_for_status()

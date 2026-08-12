@@ -14,6 +14,11 @@
   new <име>                        — създава posts/<име> от шаблона posts/_example
   check                            — пробва връзката с Open WebUI за всеки конфигуриран модел
   check-knowledge                  — показва кои knowledge/ файлове липсват/са празни
+  bench [--only ПРЕФИКС] [--save ФАЙЛ] [--compare ФАЙЛ]
+                                   — мери качеството на вече направените пускания в posts/
+                                     (без нито едно извикване към модел) и го сравнява с
+                                     референтната лента от дословните постове в корпуса.
+                                     Виж docs/research-plans/research-plan-11-text-quality.md
 """
 
 from __future__ import annotations
@@ -149,13 +154,27 @@ def cmd_check_knowledge(_args: argparse.Namespace) -> int:
     elif audit["facts_available"]:
         print("Всички полета във facts.yaml са попълнени.")
 
-    print(f"\nmembers/members.yaml: {audit['members_count']} организации")
+    print(
+        f"\nmembers/members.yaml: {audit['members_count']} организации, "
+        f"{audit['members_mentionable_count']} с потвърдено съгласие за споменаване "
+        f"(mention_allowed: true)"
+    )
+    if audit["members_count"] and not audit["members_mentionable_count"]:
+        print(
+            "  ⚠ Нито един член няма потвърдено съгласие — Писателят ползва само имената от "
+            "брифа и не добавя членове по своя преценка."
+        )
     if audit["members_with_notes"]:
         print("Записи с бележка (напр. разминаване сайт/LinkedIn):")
         for member in audit["members_with_notes"]:
             print(f"  - {member.get('name', '?')}: {member.get('notes')}")
 
-    print(f"\nexamples/good/: {audit['good_examples_count']} примера")
+    print(f"\nexamples/good/: {audit['good_examples_count']} дословни поста (еталон за подражание)")
+    if audit["summary_examples_count"]:
+        print(
+            f"  + {audit['summary_examples_count']} обобщения — НЕ влизат в промпта "
+            f"(не са дословен текст; виж план 11, Фаза 0)"
+        )
     print(f"examples/bad/: {audit['bad_examples_count']} примера")
 
     missing_or_empty = [e.path for e in audit["files"] if not e.usable]
@@ -167,6 +186,27 @@ def cmd_check_knowledge(_args: argparse.Namespace) -> int:
         return 0
 
     print("\n✓ knowledge/ е напълно попълнено.")
+    return 0
+
+
+def cmd_bench(args: argparse.Namespace) -> int:
+    """
+    Базовата линия от план 11, Фаза 1. Нарочно НЕ вика модел: чете вече съществуващите
+    пускания в posts/ и мери какво има в тях, за да е безплатно и повтаряемо.
+    """
+    from src.quality import bench
+
+    report = bench.collect(POSTS_DIR, only=args.only)
+    previous = bench.load(Path(args.compare)) if args.compare else None
+    if args.compare and previous is None:
+        print(f"⚠ {args.compare} не е намерен или не е валиден JSON — сравнението се пропуска.\n")
+
+    print(bench.render(report, previous))
+
+    if args.save:
+        saved = bench.save(report, Path(args.save))
+        print(f"\nОтчетът е записан в {saved}")
+
     return 0
 
 
@@ -212,6 +252,22 @@ def build_parser() -> argparse.ArgumentParser:
         "check-knowledge", help="показва кои knowledge/ файлове липсват/са празни"
     )
     check_knowledge_parser.set_defaults(func=cmd_check_knowledge)
+
+    bench_parser = subparsers.add_parser(
+        "bench", help="мери качеството на вече направените пускания (без извикване към модел)"
+    )
+    bench_parser.add_argument(
+        "--only",
+        default=None,
+        help="анализира само папки с този префикс, напр. --only bench- (контролиран набор брифове)",
+    )
+    bench_parser.add_argument(
+        "--save", default=None, help="записва отчета като JSON, напр. --save bench/baseline.json"
+    )
+    bench_parser.add_argument(
+        "--compare", default=None, help="сравнява с по-стар записан отчет, напр. --compare bench/baseline.json"
+    )
+    bench_parser.set_defaults(func=cmd_bench)
 
     return parser
 

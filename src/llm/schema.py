@@ -127,13 +127,6 @@ class CritiqueSchema(BaseModel):
     summary: str = Field(default="", description="едно изречение обобщение на преценката")
 
 
-SCHEMAS: dict[str, type[BaseModel]] = {
-    "plan": PlanSchema,
-    "media_selection": MediaSelectionSchema,
-    "critique": CritiqueSchema,
-}
-
-
 def parse_structured(raw_text: str, schema: type[BaseModel]) -> BaseModel:
     """
     Опитва да извлече и валидира JSON от суров текстов отговор на модел.

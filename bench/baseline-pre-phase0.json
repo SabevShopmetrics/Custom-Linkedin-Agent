@@ -1,0 +1,1001 @@
+{
+  "reference_band": {
+    "sample_size": 5,
+    "words_min": 103,
+    "words_max": 170,
+    "words_median": 113,
+    "facts_median": 22,
+    "density_min": 15.0,
+    "density_median": 15.5,
+    "empty_sentence_share_median": 14.3
+  },
+  "aggregate": {
+    "runs": 20,
+    "post_i": {
+      "words": 96.0,
+      "facts": 10.0,
+      "density": 10.1,
+      "empty_sentence_share": 28.6,
+      "count": 20
+    },
+    "post_ii": {
+      "words": 85.0,
+      "facts": 8.0,
+      "density": 11.2,
+      "empty_sentence_share": 28.6,
+      "count": 20
+    },
+    "official": {
+      "words": 82.5,
+      "facts": 9.0,
+      "density": 10.2,
+      "empty_sentence_share": 28.6,
+      "count": 20
+    },
+    "official_has_fewer_facts_than_post_i": 7,
+    "synthesis_skipped": 7,
+    "runs_with_second_post": 20,
+    "mechanical_findings_total": 5,
+    "opens_with_fact": 20
+  },
+  "posts": [
+    {
+      "name": "2026-08-11-klasterat-organizira-otvorena-sreshta-za",
+      "status": "needs_human",
+      "merged_from": [],
+      "stages": {
+        "post_i": {
+          "words": 109,
+          "sentences": 9,
+          "proper_nouns": 11,
+          "numbers": 2,
+          "emoji": 4,
+          "facts": 13,
+          "density": 11.9,
+          "empty_sentence_share": 22.2,
+          "opens_with_fact": true
+        },
+        "post_ii": {
+          "words": 88,
+          "sentences": 9,
+          "proper_nouns": 11,
+          "numbers": 2,
+          "emoji": 4,
+          "facts": 13,
+          "density": 14.8,
+          "empty_sentence_share": 22.2,
+          "opens_with_fact": true
+        },
+        "official": {
+          "words": 71,
+          "sentences": 6,
+          "proper_nouns": 8,
+          "numbers": 2,
+          "emoji": 1,
+          "facts": 10,
+          "density": 14.1,
+          "empty_sentence_share": 33.3,
+          "opens_with_fact": true
+        }
+      },
+      "findings": {
+        "mechanical": 0,
+        "tone": 1,
+        "factual": 3,
+        "rules": 0
+      },
+      "synthesis_happened": true
+    },
+    {
+      "name": "2026-08-11-klasterat-provede-sreshta-s-firmi",
+      "status": "ready_with_notes",
+      "merged_from": [
+        "post_i.md",
+        "post_ii.md"
+      ],
+      "stages": {
+        "post_i": {
+          "words": 104,
+          "sentences": 10,
+          "proper_nouns": 6,
+          "numbers": 4,
+          "emoji": 4,
+          "facts": 10,
+          "density": 9.6,
+          "empty_sentence_share": 50.0,
+          "opens_with_fact": true
+        },
+        "post_ii": {
+          "words": 83,
+          "sentences": 7,
+          "proper_nouns": 8,
+          "numbers": 4,
+          "emoji": 5,
+          "facts": 12,
+          "density": 14.5,
+          "empty_sentence_share": 14.3,
+          "opens_with_fact": true
+        },
+        "official": {
+          "words": 84,
+          "sentences": 7,
+          "proper_nouns": 8,
+          "numbers": 4,
+          "emoji": 5,
+          "facts": 12,
+          "density": 14.3,
+          "empty_sentence_share": 14.3,
+          "opens_with_fact": true
+        }
+      },
+      "findings": {
+        "mechanical": 0,
+        "tone": 1,
+        "factual": 3,
+        "rules": 0
+      },
+      "synthesis_happened": true
+    },
+    {
+      "name": "2026-08-11-klasterat-provede-sreshta-s-firmi-2",
+      "status": "ready_with_notes",
+      "merged_from": [
+        "post_i.md",
+        "post_ii.md"
+      ],
+      "stages": {
+        "post_i": {
+          "words": 84,
+          "sentences": 10,
+          "proper_nouns": 2,
+          "numbers": 4,
+          "emoji": 4,
+          "facts": 6,
+          "density": 7.1,
+          "empty_sentence_share": 50.0,
+          "opens_with_fact": true
+        },
+        "post_ii": {
+          "words": 64,
+          "sentences": 6,
+          "proper_nouns": 4,
+          "numbers": 4,
+          "emoji": 2,
+          "facts": 8,
+          "density": 12.5,
+          "empty_sentence_share": 16.7,
+          "opens_with_fact": true
+        },
+        "official": {
+          "words": 64,
+          "sentences": 6,
+          "proper_nouns": 3,
+          "numbers": 4,
+          "emoji": 2,
+          "facts": 7,
+          "density": 10.9,
+          "empty_sentence_share": 33.3,
+          "opens_with_fact": true
+        }
+      },
+      "findings": {
+        "mechanical": 0,
+        "tone": 0,
+        "factual": 4,
+        "rules": 0
+      },
+      "synthesis_happened": true
+    },
+    {
+      "name": "2026-08-11-klasterat-provede-sreshta-s-firmi-3",
+      "status": "ready_with_notes",
+      "merged_from": [
+        "post_i.md",
+        "post_ii.md"
+      ],
+      "stages": {
+        "post_i": {
+          "words": 95,
+          "sentences": 10,
+          "proper_nouns": 2,
+          "numbers": 4,
+          "emoji": 4,
+          "facts": 6,
+          "density": 6.3,
+          "empty_sentence_share": 60.0,
+          "opens_with_fact": true
+        },
+        "post_ii": {
+          "words": 70,
+          "sentences": 7,
+          "proper_nouns": 3,
+          "numbers": 4,
+          "emoji": 4,
+          "facts": 7,
+          "density": 10.0,
+          "empty_sentence_share": 28.6,
+          "opens_with_fact": true
+        },
+        "official": {
+          "words": 77,
+          "sentences": 7,
+          "proper_nouns": 2,
+          "numbers": 4,
+          "emoji": 4,
+          "facts": 6,
+          "density": 7.8,
+          "empty_sentence_share": 42.9,
+          "opens_with_fact": true
+        }
+      },
+      "findings": {
+        "mechanical": 1,
+        "tone": 1,
+        "factual": 1,
+        "rules": 0
+      },
+      "synthesis_happened": true
+    },
+    {
+      "name": "2026-08-11-klasterat-startira-stazhantska-programa-za",
+      "status": "needs_human",
+      "merged_from": [],
+      "stages": {
+        "post_i": {
+          "words": 86,
+          "sentences": 8,
+          "proper_nouns": 10,
+          "numbers": 2,
+          "emoji": 4,
+          "facts": 12,
+          "density": 14.0,
+          "empty_sentence_share": 12.5,
+          "opens_with_fact": true
+        },
+        "post_ii": {
+          "words": 50,
+          "sentences": 5,
+          "proper_nouns": 6,
+          "numbers": 2,
+          "emoji": 1,
+          "facts": 8,
+          "density": 16.0,
+          "empty_sentence_share": 20.0,
+          "opens_with_fact": true
+        },
+        "official": {
+          "words": 117,
+          "sentences": 8,
+          "proper_nouns": 8,
+          "numbers": 2,
+          "emoji": 5,
+          "facts": 10,
+          "density": 8.5,
+          "empty_sentence_share": 25.0,
+          "opens_with_fact": true
+        }
+      },
+      "findings": {
+        "mechanical": 0,
+        "tone": 0,
+        "factual": 4,
+        "rules": 0
+      },
+      "synthesis_happened": true
+    },
+    {
+      "name": "2026-08-11-klasterat-startira-stazhantska-programa-za-2",
+      "status": "ready_with_notes",
+      "merged_from": [
+        "post_i.md",
+        "post_ii.md"
+      ],
+      "stages": {
+        "post_i": {
+          "words": 96,
+          "sentences": 9,
+          "proper_nouns": 9,
+          "numbers": 3,
+          "emoji": 4,
+          "facts": 12,
+          "density": 12.5,
+          "empty_sentence_share": 22.2,
+          "opens_with_fact": true
+        },
+        "post_ii": {
+          "words": 79,
+          "sentences": 9,
+          "proper_nouns": 9,
+          "numbers": 4,
+          "emoji": 4,
+          "facts": 13,
+          "density": 16.5,
+          "empty_sentence_share": 11.1,
+          "opens_with_fact": true
+        },
+        "official": {
+          "words": 79,
+          "sentences": 9,
+          "proper_nouns": 9,
+          "numbers": 4,
+          "emoji": 4,
+          "facts": 13,
+          "density": 16.5,
+          "empty_sentence_share": 11.1,
+          "opens_with_fact": true
+        }
+      },
+      "findings": {
+        "mechanical": 0,
+        "tone": 3,
+        "factual": 4,
+        "rules": 0
+      },
+      "synthesis_happened": false
+    },
+    {
+      "name": "2026-08-11-klasterat-startira-stazhantska-programa-za-3",
+      "status": "ready_with_notes",
+      "merged_from": [
+        "post_i.md",
+        "post_ii.md"
+      ],
+      "stages": {
+        "post_i": {
+          "words": 98,
+          "sentences": 8,
+          "proper_nouns": 11,
+          "numbers": 2,
+          "emoji": 4,
+          "facts": 13,
+          "density": 13.3,
+          "empty_sentence_share": 25.0,
+          "opens_with_fact": true
+        },
+        "post_ii": {
+          "words": 102,
+          "sentences": 7,
+          "proper_nouns": 5,
+          "numbers": 2,
+          "emoji": 1,
+          "facts": 7,
+          "density": 6.9,
+          "empty_sentence_share": 28.6,
+          "opens_with_fact": true
+        },
+        "official": {
+          "words": 80,
+          "sentences": 5,
+          "proper_nouns": 5,
+          "numbers": 2,
+          "emoji": 1,
+          "facts": 7,
+          "density": 8.8,
+          "empty_sentence_share": 0.0,
+          "opens_with_fact": true
+        }
+      },
+      "findings": {
+        "mechanical": 0,
+        "tone": 3,
+        "factual": 4,
+        "rules": 0
+      },
+      "synthesis_happened": true
+    },
+    {
+      "name": "2026-08-11-na-5-avgust-2026-g",
+      "status": "ready_with_notes",
+      "merged_from": [
+        "post_i.md",
+        "post_ii.md"
+      ],
+      "stages": {
+        "post_i": {
+          "words": 95,
+          "sentences": 10,
+          "proper_nouns": 8,
+          "numbers": 4,
+          "emoji": 6,
+          "facts": 12,
+          "density": 12.6,
+          "empty_sentence_share": 30.0,
+          "opens_with_fact": true
+        },
+        "post_ii": {
+          "words": 77,
+          "sentences": 7,
+          "proper_nouns": 3,
+          "numbers": 4,
+          "emoji": 3,
+          "facts": 7,
+          "density": 9.1,
+          "empty_sentence_share": 42.9,
+          "opens_with_fact": true
+        },
+        "official": {
+          "words": 96,
+          "sentences": 8,
+          "proper_nouns": 3,
+          "numbers": 4,
+          "emoji": 3,
+          "facts": 7,
+          "density": 7.3,
+          "empty_sentence_share": 50.0,
+          "opens_with_fact": true
+        }
+      },
+      "findings": {
+        "mechanical": 0,
+        "tone": 2,
+        "factual": 1,
+        "rules": 0
+      },
+      "synthesis_happened": true
+    },
+    {
+      "name": "2026-08-11-post-za-partnyorstvo-nyama-takav",
+      "status": "needs_human",
+      "merged_from": [],
+      "stages": {
+        "post_i": {
+          "words": 97,
+          "sentences": 8,
+          "proper_nouns": 8,
+          "numbers": 0,
+          "emoji": 5,
+          "facts": 8,
+          "density": 8.2,
+          "empty_sentence_share": 37.5,
+          "opens_with_fact": true
+        },
+        "post_ii": {
+          "words": 91,
+          "sentences": 8,
+          "proper_nouns": 7,
+          "numbers": 0,
+          "emoji": 5,
+          "facts": 7,
+          "density": 7.7,
+          "empty_sentence_share": 37.5,
+          "opens_with_fact": true
+        },
+        "official": {
+          "words": 66,
+          "sentences": 5,
+          "proper_nouns": 4,
+          "numbers": 0,
+          "emoji": 2,
+          "facts": 4,
+          "density": 6.1,
+          "empty_sentence_share": 60.0,
+          "opens_with_fact": true
+        }
+      },
+      "findings": {
+        "mechanical": 0,
+        "tone": 3,
+        "factual": 4,
+        "rules": 0
+      },
+      "synthesis_happened": true
+    },
+    {
+      "name": "batch-01-praktiki",
+      "status": "ready",
+      "merged_from": [],
+      "stages": {
+        "post_i": {
+          "words": 102,
+          "sentences": 9,
+          "proper_nouns": 6,
+          "numbers": 3,
+          "emoji": 3,
+          "facts": 9,
+          "density": 8.8,
+          "empty_sentence_share": 33.3,
+          "opens_with_fact": true
+        },
+        "post_ii": {
+          "words": 102,
+          "sentences": 9,
+          "proper_nouns": 6,
+          "numbers": 2,
+          "emoji": 3,
+          "facts": 8,
+          "density": 7.8,
+          "empty_sentence_share": 33.3,
+          "opens_with_fact": true
+        },
+        "official": {
+          "words": 97,
+          "sentences": 9,
+          "proper_nouns": 7,
+          "numbers": 2,
+          "emoji": 5,
+          "facts": 9,
+          "density": 9.3,
+          "empty_sentence_share": 22.2,
+          "opens_with_fact": true
+        }
+      },
+      "findings": {
+        "mechanical": 0,
+        "tone": 0,
+        "factual": 1,
+        "rules": 0
+      },
+      "synthesis_happened": true
+    },
+    {
+      "name": "batch-02-flagship-event",
+      "status": "needs_human",
+      "merged_from": [],
+      "stages": {
+        "post_i": {
+          "words": 117,
+          "sentences": 10,
+          "proper_nouns": 11,
+          "numbers": 5,
+          "emoji": 1,
+          "facts": 16,
+          "density": 13.7,
+          "empty_sentence_share": 40.0,
+          "opens_with_fact": true
+        },
+        "post_ii": {
+          "words": 97,
+          "sentences": 12,
+          "proper_nouns": 16,
+          "numbers": 5,
+          "emoji": 5,
+          "facts": 21,
+          "density": 21.6,
+          "empty_sentence_share": 25.0,
+          "opens_with_fact": true
+        },
+        "official": {
+          "words": 97,
+          "sentences": 12,
+          "proper_nouns": 16,
+          "numbers": 2,
+          "emoji": 5,
+          "facts": 18,
+          "density": 18.6,
+          "empty_sentence_share": 25.0,
+          "opens_with_fact": true
+        }
+      },
+      "findings": {
+        "mechanical": 1,
+        "tone": 1,
+        "factual": 3,
+        "rules": 0
+      },
+      "synthesis_happened": true
+    },
+    {
+      "name": "batch-03-partnership-gdpr",
+      "status": "needs_human",
+      "merged_from": [],
+      "stages": {
+        "post_i": {
+          "words": 96,
+          "sentences": 6,
+          "proper_nouns": 9,
+          "numbers": 0,
+          "emoji": 4,
+          "facts": 9,
+          "density": 9.4,
+          "empty_sentence_share": 33.3,
+          "opens_with_fact": true
+        },
+        "post_ii": {
+          "words": 91,
+          "sentences": 6,
+          "proper_nouns": 6,
+          "numbers": 0,
+          "emoji": 4,
+          "facts": 6,
+          "density": 6.6,
+          "empty_sentence_share": 33.3,
+          "opens_with_fact": true
+        },
+        "official": {
+          "words": 96,
+          "sentences": 6,
+          "proper_nouns": 9,
+          "numbers": 0,
+          "emoji": 4,
+          "facts": 9,
+          "density": 9.4,
+          "empty_sentence_share": 33.3,
+          "opens_with_fact": true
+        }
+      },
+      "findings": {
+        "mechanical": 0,
+        "tone": 3,
+        "factual": 1,
+        "rules": 3
+      },
+      "synthesis_happened": true
+    },
+    {
+      "name": "batch-04-fund-award",
+      "status": "needs_human",
+      "merged_from": [],
+      "stages": {
+        "post_i": {
+          "words": 91,
+          "sentences": 9,
+          "proper_nouns": 10,
+          "numbers": 2,
+          "emoji": 5,
+          "facts": 12,
+          "density": 13.2,
+          "empty_sentence_share": 22.2,
+          "opens_with_fact": true
+        },
+        "post_ii": {
+          "words": 86,
+          "sentences": 7,
+          "proper_nouns": 11,
+          "numbers": 2,
+          "emoji": 4,
+          "facts": 13,
+          "density": 15.1,
+          "empty_sentence_share": 14.3,
+          "opens_with_fact": true
+        },
+        "official": {
+          "words": 80,
+          "sentences": 6,
+          "proper_nouns": 12,
+          "numbers": 2,
+          "emoji": 3,
+          "facts": 14,
+          "density": 17.5,
+          "empty_sentence_share": 0.0,
+          "opens_with_fact": true
+        }
+      },
+      "findings": {
+        "mechanical": 2,
+        "tone": 0,
+        "factual": 3,
+        "rules": 0
+      },
+      "synthesis_happened": true
+    },
+    {
+      "name": "batch-05-hackathon-win",
+      "status": "ready",
+      "merged_from": [],
+      "stages": {
+        "post_i": {
+          "words": 117,
+          "sentences": 8,
+          "proper_nouns": 9,
+          "numbers": 4,
+          "emoji": 4,
+          "facts": 13,
+          "density": 11.1,
+          "empty_sentence_share": 25.0,
+          "opens_with_fact": true
+        },
+        "post_ii": {
+          "words": 117,
+          "sentences": 8,
+          "proper_nouns": 9,
+          "numbers": 4,
+          "emoji": 4,
+          "facts": 13,
+          "density": 11.1,
+          "empty_sentence_share": 25.0,
+          "opens_with_fact": true
+        },
+        "official": {
+          "words": 117,
+          "sentences": 8,
+          "proper_nouns": 9,
+          "numbers": 4,
+          "emoji": 4,
+          "facts": 13,
+          "density": 11.1,
+          "empty_sentence_share": 25.0,
+          "opens_with_fact": true
+        }
+      },
+      "findings": {
+        "mechanical": 0,
+        "tone": 0,
+        "factual": 0,
+        "rules": 0
+      },
+      "synthesis_happened": false
+    },
+    {
+      "name": "batch-06-member-profile",
+      "status": "needs_human",
+      "merged_from": [],
+      "stages": {
+        "post_i": {
+          "words": 96,
+          "sentences": 6,
+          "proper_nouns": 9,
+          "numbers": 1,
+          "emoji": 3,
+          "facts": 10,
+          "density": 10.4,
+          "empty_sentence_share": 0.0,
+          "opens_with_fact": true
+        },
+        "post_ii": {
+          "words": 70,
+          "sentences": 6,
+          "proper_nouns": 10,
+          "numbers": 1,
+          "emoji": 3,
+          "facts": 11,
+          "density": 15.7,
+          "empty_sentence_share": 0.0,
+          "opens_with_fact": true
+        },
+        "official": {
+          "words": 70,
+          "sentences": 6,
+          "proper_nouns": 10,
+          "numbers": 1,
+          "emoji": 3,
+          "facts": 11,
+          "density": 15.7,
+          "empty_sentence_share": 0.0,
+          "opens_with_fact": true
+        }
+      },
+      "findings": {
+        "mechanical": 0,
+        "tone": 1,
+        "factual": 3,
+        "rules": 2
+      },
+      "synthesis_happened": false
+    },
+    {
+      "name": "batch-07-general-assembly",
+      "status": "ready",
+      "merged_from": [],
+      "stages": {
+        "post_i": {
+          "words": 84,
+          "sentences": 7,
+          "proper_nouns": 9,
+          "numbers": 1,
+          "emoji": 4,
+          "facts": 10,
+          "density": 11.9,
+          "empty_sentence_share": 28.6,
+          "opens_with_fact": true
+        },
+        "post_ii": {
+          "words": 84,
+          "sentences": 7,
+          "proper_nouns": 9,
+          "numbers": 1,
+          "emoji": 4,
+          "facts": 10,
+          "density": 11.9,
+          "empty_sentence_share": 28.6,
+          "opens_with_fact": true
+        },
+        "official": {
+          "words": 84,
+          "sentences": 7,
+          "proper_nouns": 9,
+          "numbers": 1,
+          "emoji": 4,
+          "facts": 10,
+          "density": 11.9,
+          "empty_sentence_share": 28.6,
+          "opens_with_fact": true
+        }
+      },
+      "findings": {
+        "mechanical": 0,
+        "tone": 0,
+        "factual": 0,
+        "rules": 0
+      },
+      "synthesis_happened": false
+    },
+    {
+      "name": "batch-08-business-forum",
+      "status": "ready",
+      "merged_from": [],
+      "stages": {
+        "post_i": {
+          "words": 91,
+          "sentences": 7,
+          "proper_nouns": 7,
+          "numbers": 0,
+          "emoji": 5,
+          "facts": 7,
+          "density": 7.7,
+          "empty_sentence_share": 28.6,
+          "opens_with_fact": true
+        },
+        "post_ii": {
+          "words": 91,
+          "sentences": 7,
+          "proper_nouns": 7,
+          "numbers": 0,
+          "emoji": 5,
+          "facts": 7,
+          "density": 7.7,
+          "empty_sentence_share": 28.6,
+          "opens_with_fact": true
+        },
+        "official": {
+          "words": 91,
+          "sentences": 7,
+          "proper_nouns": 7,
+          "numbers": 0,
+          "emoji": 5,
+          "facts": 7,
+          "density": 7.7,
+          "empty_sentence_share": 28.6,
+          "opens_with_fact": true
+        }
+      },
+      "findings": {
+        "mechanical": 0,
+        "tone": 0,
+        "factual": 0,
+        "rules": 0
+      },
+      "synthesis_happened": false
+    },
+    {
+      "name": "batch-09-personal-name-gdpr",
+      "status": "needs_human",
+      "merged_from": [],
+      "stages": {
+        "post_i": {
+          "words": 102,
+          "sentences": 9,
+          "proper_nouns": 8,
+          "numbers": 2,
+          "emoji": 4,
+          "facts": 10,
+          "density": 9.8,
+          "empty_sentence_share": 33.3,
+          "opens_with_fact": true
+        },
+        "post_ii": {
+          "words": 82,
+          "sentences": 8,
+          "proper_nouns": 7,
+          "numbers": 0,
+          "emoji": 4,
+          "facts": 7,
+          "density": 8.5,
+          "empty_sentence_share": 37.5,
+          "opens_with_fact": true
+        },
+        "official": {
+          "words": 81,
+          "sentences": 7,
+          "proper_nouns": 7,
+          "numbers": 0,
+          "emoji": 4,
+          "facts": 7,
+          "density": 8.6,
+          "empty_sentence_share": 28.6,
+          "opens_with_fact": true
+        }
+      },
+      "findings": {
+        "mechanical": 0,
+        "tone": 1,
+        "factual": 3,
+        "rules": 0
+      },
+      "synthesis_happened": true
+    },
+    {
+      "name": "batch-10-forbidden-content",
+      "status": "needs_human",
+      "merged_from": [],
+      "stages": {
+        "post_i": {
+          "words": 98,
+          "sentences": 4,
+          "proper_nouns": 6,
+          "numbers": 0,
+          "emoji": 0,
+          "facts": 6,
+          "density": 6.1,
+          "empty_sentence_share": 25.0,
+          "opens_with_fact": false
+        },
+        "post_ii": {
+          "words": 104,
+          "sentences": 5,
+          "proper_nouns": 5,
+          "numbers": 0,
+          "emoji": 0,
+          "facts": 5,
+          "density": 4.8,
+          "empty_sentence_share": 40.0,
+          "opens_with_fact": true
+        },
+        "official": {
+          "words": 104,
+          "sentences": 5,
+          "proper_nouns": 5,
+          "numbers": 0,
+          "emoji": 0,
+          "facts": 5,
+          "density": 4.8,
+          "empty_sentence_share": 40.0,
+          "opens_with_fact": true
+        }
+      },
+      "findings": {
+        "mechanical": 0,
+        "tone": 4,
+        "factual": 2,
+        "rules": 0
+      },
+      "synthesis_happened": false
+    },
+    {
+      "name": "quick-test",
+      "status": "ready",
+      "merged_from": [],
+      "stages": {
+        "post_i": {
+          "words": 83,
+          "sentences": 7,
+          "proper_nouns": 5,
+          "numbers": 3,
+          "emoji": 2,
+          "facts": 8,
+          "density": 9.6,
+          "empty_sentence_share": 28.6,
+          "opens_with_fact": true
+        },
+        "post_ii": {
+          "words": 70,
+          "sentences": 7,
+          "proper_nouns": 5,
+          "numbers": 3,
+          "emoji": 5,
+          "facts": 8,
+          "density": 11.4,
+          "empty_sentence_share": 28.6,
+          "opens_with_fact": true
+        },
+        "official": {
+          "words": 70,
+          "sentences": 7,
+          "proper_nouns": 5,
+          "numbers": 3,
+          "emoji": 5,
+          "facts": 8,
+          "density": 11.4,
+          "empty_sentence_share": 28.6,
+          "opens_with_fact": true
+        }
+      },
+      "findings": {
+        "mechanical": 1,
+        "tone": 0,
+        "factual": 4,
+        "rules": 0
+      },
+      "synthesis_happened": false
+    }
+  ]
+}

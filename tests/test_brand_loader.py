@@ -157,3 +157,113 @@ members:
 
     assert len(result["members_with_notes"]) == 1
     assert result["members_with_notes"][0]["name"] == "Devia Bulgaria"
+
+
+# --------------------------------------------------------------- план 11, Фаза 0
+# Хигиена на входа: коментарите не са съдържание, а еталон е само дословен пост.
+# Виж docs/research-plans/research-plan-11-text-quality.md, находки 2.4 и 2.5.
+
+
+def test_file_with_only_html_comments_counts_as_empty(tmp_path):
+    """
+    Реалният случай, който наложи проверката: rules/forbidden.md и voice/vocabulary.md
+    съдържаха само `<!-- какво трябва да съдържа този файл -->` + `<!-- TODO -->`, но
+    одитът ги отчиташе като налични, защото файлът не е празен на диска. Моделът
+    получаваше описанието като правило.
+    """
+    knowledge_dir = tmp_path / "knowledge"
+    _write(
+        knowledge_dir / "rules/forbidden.md",
+        "<!--\nКакво трябва да съдържа този файл: червени линии.\n-->\n<!-- TODO -->\n",
+    )
+
+    knowledge = load_brand_knowledge(knowledge_dir)
+    entry = next(a for a in knowledge.audit if a.path == "rules/forbidden.md")
+
+    assert entry.exists is True
+    assert entry.empty is True
+    assert entry.usable is False
+    assert "ЗАБРАНЕНО" not in knowledge.stable_context
+    assert "червени линии" not in knowledge.stable_context
+
+
+def test_comments_are_stripped_from_sections_that_do_have_content(tmp_path):
+    knowledge_dir = tmp_path / "knowledge"
+    _write(knowledge_dir / "voice/tone.md", "- Дължина: 60–150 думи.\n\n<!-- TODO: клъстерът ще допълни -->\n")
+
+    knowledge = load_brand_knowledge(knowledge_dir)
+
+    assert "Дължина: 60–150 думи." in knowledge.stable_context
+    assert "TODO" not in knowledge.stable_context
+    assert "<!--" not in knowledge.stable_context
+
+
+def test_only_post_text_section_of_an_example_reaches_the_prompt(tmp_path):
+    """
+    Целият файл влизаше в промпта — заедно с percent-encoded LinkedIn URL и с блока
+    „Защо е добър пример", който е анализ за човек, не текст за подражание.
+    """
+    knowledge_dir = tmp_path / "knowledge"
+    _write(
+        knowledge_dir / "examples/good/01-praktiki.md",
+        "<!-- Реален пост, пълен оригинален текст. -->\n\n"
+        "## Линк към оригиналния пост\n\n"
+        "https://www.linkedin.com/posts/ict-cluster-varna_%D0%BD%D0%B0-activity-747303\n\n"
+        "## Защо е добър пример\n\n"
+        "Показва как се съчетават гост и резултат за общността.\n\n"
+        "## Текст на поста\n\n"
+        "На 11 юни проведохме петото издание.\n",
+    )
+
+    knowledge = load_brand_knowledge(knowledge_dir)
+
+    assert knowledge.good_examples == ["На 11 юни проведохме петото издание."]
+    assert "linkedin.com/posts" not in knowledge.stable_context
+    assert "Защо е добър пример" not in knowledge.stable_context
+    assert "На 11 юни проведохме петото издание." in knowledge.stable_context
+
+
+def test_summary_examples_are_loaded_but_kept_out_of_the_prompt(tmp_path):
+    """
+    7 от 12 файла в examples/good/ сами се обявяват за обобщение („40 реакции.",
+    „Споменава се, че…"). Като еталон за подражание те учат модела на стил, който никога
+    не е бил в пост — затова се броят, но не влизат в stable_context.
+    """
+    knowledge_dir = tmp_path / "knowledge"
+    _write(
+        knowledge_dir / "examples/good/08-technostart.md",
+        "<!--\nОбобщение, НЕ пълен оригинален текст — само URL адресът е потвърден.\n-->\n\n"
+        "## Текст на поста\n\n"
+        "27 отбора. 76 участници. 40 реакции.\n",
+    )
+    _write(
+        knowledge_dir / "examples/good/01-praktiki.md",
+        "<!-- Реален пост, пълен оригинален текст. -->\n\n## Текст на поста\n\nДословен пост.\n",
+    )
+
+    knowledge = load_brand_knowledge(knowledge_dir)
+
+    assert knowledge.good_examples == ["Дословен пост."]
+    assert knowledge.summary_examples == ["27 отбора. 76 участници. 40 реакции."]
+    assert "40 реакции" not in knowledge.stable_context
+    assert "Дословен пост." in knowledge.stable_context
+
+
+def test_audit_counts_summaries_separately_from_verbatim_examples(tmp_path):
+    knowledge_dir = tmp_path / "knowledge"
+    _write(
+        knowledge_dir / "examples/good/a.md",
+        "<!-- Обобщение, НЕ пълен оригинален текст -->\n## Текст на поста\n\nОбобщено.\n",
+    )
+    _write(knowledge_dir / "examples/good/b.md", "## Текст на поста\n\nДословно.\n")
+    _write(
+        knowledge_dir / "members/members.yaml",
+        "members:\n  - name: 'Zariba'\n    mention_allowed: true\n  - name: 'ВВМУ'\n    mention_allowed: null\n",
+    )
+
+    result = audit_knowledge(knowledge_dir)
+
+    assert result["good_examples_count"] == 1
+    assert result["summary_examples_count"] == 1
+    assert result["members_count"] == 2
+    assert result["members_mentionable_count"] == 1

@@ -8,12 +8,22 @@
 първия текст заедно с проблемите му; вторият пост има право да преструктурира. И двата
 остават на диска, защото Консолидаторът съставя официалното предложение от двата
 (виж src/pipeline/consolidator.py и docs/technical/process-3.md).
+
+От 2026-08-12 (план 11, Фаза 0, находка 2.6): Писателят получава facts.yaml и списъка
+членове, които може да назове. Дотогава тези два източника влизаха само в промпта на
+Критика — тоест корпусът се използваше, за да се хване Писателят, че не е конкретен, но
+не и за да му се даде с какво да бъде. При тънък бриф това му оставяше три възможности:
+да измисли (забранено), да премълчи (къс пост) или да напише общо. Мерено на 20 реални
+пускания, случваше се третото.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
+import yaml
+
+from src.brand.loader import BrandKnowledge
 from src.llm.client import LLMClient
 from src.llm.roles import Role
 from src.llm.schema import PlanSchema
@@ -28,13 +38,16 @@ DRAFT_SYSTEM_PROMPT_TEMPLATE = """\
 
 {brand_context}
 
+{sources_block}
+
 Планът за този конкретен пост:
 - тип: {post_type}
 - формат: {format}
 - тон: {tone}
 - бележки: {notes}
 
-Пиши само на база брифа по-долу — не измисляй факти, имена или числа, които не са в него.
+Пиши на база брифа по-долу и ИЗТОЧНИЦИТЕ по-горе — не измисляй факти, имена или числа,
+които не са в нито едно от двете.
 
 КАК РАБОТИ LINKEDIN (изведено от проучване, август 2026 — виж
 docs/research-plans/research-plan-10-linkedin-post-craft.md). Където това се разминава с
@@ -50,7 +63,69 @@ docs/research-plans/research-plan-10-linkedin-post-craft.md). Където то�
 - Без въдици за ангажимент („Съгласни ли сте? Коментирайте по-долу", „Пишете 👇") — от 2026
   LinkedIn изрично понижава такива постове.
 - Пиши за конкретна аудитория (студенти, фирми членове, партньори), не за всички наведнъж.
+- Плътност: всяко изречение носи факт — число, име, дата, място, конкретен резултат.
+  Изречение, което може да стои в пост на всяка друга организация („фокусирахме се върху
+  ключови етапи", „с цел максимална полза"), е празно и не бива да го има. По-добре с
+  едно изречение по-малко, отколкото с едно празно повече.
 """
+
+SOURCES_BLOCK_TEMPLATE = """\
+ИЗТОЧНИЦИ ЗА ПРОСЛЕДИМИ ФАКТИ. Всяко число, име, дата, програма или адрес в поста трябва да
+идва от брифа или оттук. Това не е списък за изчерпване — вземай само относимото към повода.
+Каквото не е нито в брифа, нито тук, не съществува и не се пише.
+
+{facts_block}
+
+{members_block}\
+"""
+
+
+def render_sources_block(knowledge: BrandKnowledge) -> str:
+    """
+    Фактическите източници, форматирани за Писателя.
+
+    Различно от същите блокове в critic.py по предназначение: там въпросът е „проследимо ли
+    е това твърдение", тук — „с какво имам право да бъда конкретен". Затова списъкът с
+    членове е обърнат: Критикът вижда всички (за да ги хване), Писателят вижда само тези с
+    потвърдено съгласие. Име, което не е пред очите му, е име, което няма да сложи.
+    """
+    if knowledge.facts_available and knowledge.facts:
+        facts_yaml = yaml.safe_dump(knowledge.facts, allow_unicode=True, sort_keys=False)
+        facts_block = f"## ФАКТИ ЗА ОРГАНИЗАЦИЯТА (identity/facts.yaml)\n\n```yaml\n{facts_yaml}```"
+    else:
+        facts_block = (
+            "## ФАКТИ ЗА ОРГАНИЗАЦИЯТА\n\n"
+            "facts.yaml липсва или е празен — брифът е единственият ти източник за факти."
+        )
+
+    mentionable = [
+        str(member.get("name", "")).strip()
+        for member in knowledge.members
+        if member.get("mention_allowed") is True and member.get("name")
+    ]
+    header = "## СПОМЕНАВАНЕ НА ОРГАНИЗАЦИИ ПО ИМЕ"
+    rule = (
+        "Правилото е едно: **име, което не е в брифа, не влиза в поста.** Брифът е писан от "
+        "човек, който отговаря за него — щом е сложил името, ползвай го. Обратното НЕ важи: "
+        "не изваждай имена от корпуса или от еталонните примери, за да обогатиш текста. "
+        "Когато трябва да споменеш организация, която не е в брифа, пиши обобщено: "
+        "'фирми членове', 'партньорска гимназия', 'университет партньор'."
+    )
+    if mentionable:
+        names = "\n".join(f"- {name}" for name in mentionable)
+        members_block = (
+            f"{header}\n\n{rule}\n\n"
+            f"Членове с изрично потвърдено съгласие (mention_allowed: true) — тях може да "
+            f"назовеш и когато не са в брифа, ако поводът наистина ги засяга:\n{names}"
+        )
+    else:
+        members_block = (
+            f"{header}\n\n{rule}\n\n"
+            "Нито един член няма потвърдено съгласие (mention_allowed: true) в members.yaml, "
+            "затова няма име, което да добавиш по своя преценка."
+        )
+
+    return SOURCES_BLOCK_TEMPLATE.format(facts_block=facts_block, members_block=members_block)
 
 SECOND_POST_SYSTEM_PROMPT_TEMPLATE = """\
 Ти си същият Писател. Пишеш ВТОРА версия на същия пост. Първата версия вече съществува и
@@ -76,13 +151,15 @@ SECOND_POST_SYSTEM_PROMPT_TEMPLATE = """\
 Контекст за организацията, глас и стил:
 
 {brand_context}
+
+{sources_block}
 """
 
 
 def write_first_draft(
     post_dir: Path,
     client: LLMClient,
-    brand_context: str,
+    knowledge: BrandKnowledge,
     plan: PlanSchema,
     briefing_text: str,
     *,
@@ -93,7 +170,8 @@ def write_first_draft(
         return read_text_or_none(draft_path) or ""
 
     system = DRAFT_SYSTEM_PROMPT_TEMPLATE.format(
-        brand_context=brand_context or "(няма зареден brand контекст)",
+        brand_context=knowledge.stable_context or "(няма зареден brand контекст)",
+        sources_block=render_sources_block(knowledge),
         post_type=plan.post_type,
         format=plan.format,
         tone=plan.tone,
@@ -108,7 +186,7 @@ def write_first_draft(
 def write_second_post(
     post_dir: Path,
     client: LLMClient,
-    brand_context: str,
+    knowledge: BrandKnowledge,
     plan: PlanSchema,
     briefing_text: str,
     first_post_text: str,
@@ -130,7 +208,8 @@ def write_second_post(
         f"Напиши Версия II — същият повод, без изброените слабости."
     )
     system = SECOND_POST_SYSTEM_PROMPT_TEMPLATE.format(
-        brand_context=brand_context or "(няма зареден brand контекст)"
+        brand_context=knowledge.stable_context or "(няма зареден brand контекст)",
+        sources_block=render_sources_block(knowledge),
     )
 
     text = client.complete(Role.WRITER, prompt, system=system)

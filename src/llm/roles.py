@@ -19,10 +19,6 @@ class Role(str, Enum):
     CONSOLIDATOR = "consolidator"
 
 
-# Ревизията (стъпка 5) използва същия модел като Писателя — вижте
-# docs/prompts/agent-bootstrap-prompt.md, таблица "Модели по роля": "Ревизия — Същият като Писателя".
-REVISION_ROLE = Role.WRITER
-
 _ROLE_TO_CONFIG_FIELD: dict[Role, str] = {
     Role.PLANNER: "model_planner",
     Role.WRITER: "model_writer",

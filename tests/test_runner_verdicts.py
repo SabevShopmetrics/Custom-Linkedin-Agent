@@ -15,8 +15,6 @@ from __future__ import annotations
 
 from typing import Any
 
-import pytest
-
 from src.brand.format_rules import parse_format_rules
 from src.errors import ModelUnavailableError
 from src.llm.roles import Role
@@ -39,12 +37,10 @@ PLAN = PlanSchema(
 
 CLEAN_CRITIQUE = CritiqueSchema(verdict=Verdict.OK, facts=[], tone_issues=[], rule_violations=[], summary="")
 
-
 def tone_critique(*issues: str) -> CritiqueSchema:
     return CritiqueSchema(
         verdict=Verdict.NEEDS_REVISION, facts=[], tone_issues=list(issues), rule_violations=[], summary=""
     )
-
 
 class FakeSequencedClient:
     """Връща предварително зададени отговори по роля, поред. Гърми, ако опашката за
@@ -66,11 +62,9 @@ class FakeSequencedClient:
             raise value
         return value
 
-
 def _write_briefing(post_dir):
     post_dir.mkdir(parents=True, exist_ok=True)
     (post_dir / "briefing.md").write_text("Проведохме събитие вчера.", encoding="utf-8")
-
 
 def make_client(
     *,
@@ -89,9 +83,7 @@ def make_client(
         }
     )
 
-
 # --------------------------------------------------------------- основният нов поток
-
 
 def test_findings_produce_second_post_and_consolidator_sees_both(tmp_path):
     """Сърцевината на промяната: критиката води до втори пост, а не до отказ, и
@@ -116,7 +108,6 @@ def test_findings_produce_second_post_and_consolidator_sees_both(tmp_path):
     assert "Пост II без клише." in merge_prompt
     assert "клише" in merge_prompt  # находката пътува до Консолидатора, за да не я върне обратно
 
-
 def test_critique_findings_reach_the_second_post_prompt(tmp_path):
     post_dir = tmp_path / "post"
     _write_briefing(post_dir)
@@ -140,7 +131,6 @@ def test_critique_findings_reach_the_second_post_prompt(tmp_path):
     assert "звучи като превод от английски" in second_prompt
     assert "40 членове" in second_prompt
 
-
 def test_no_findings_skips_the_second_post(tmp_path):
     """Няма какво да се запълва → втори модел ход не се харчи, консолидира се само Post I."""
     post_dir = tmp_path / "post"
@@ -157,9 +147,7 @@ def test_no_findings_skips_the_second_post(tmp_path):
     assert result.merged_from == ["post_i.md"]
     assert not (post_dir / "post_ii.md").exists()
 
-
 # --------------------------------------------------------------- нищо не отхвърля поста
-
 
 def test_forbidden_violation_no_longer_stops_the_pipeline(tmp_path):
     """
@@ -189,7 +177,6 @@ def test_forbidden_violation_no_longer_stops_the_pipeline(tmp_path):
     assert (post_dir / "output" / "post.md").exists()
     assert "критикува конкретна фирма-конкурент" in client.prompts[Role.WRITER][1]
 
-
 def test_verbatim_copy_of_a_draft_becomes_an_open_note(tmp_path):
     post_dir = tmp_path / "post"
     _write_briefing(post_dir)
@@ -204,7 +191,6 @@ def test_verbatim_copy_of_a_draft_becomes_an_open_note(tmp_path):
     assert result.status == "ready_with_notes"
     assert any("дословно" in note for note in result.open_notes)
     assert result.post_path.exists()  # предложението пак излиза — това е бележка, не спирач
-
 
 def test_problem_surviving_into_the_proposal_becomes_an_open_note(tmp_path):
     post_dir = tmp_path / "post"
@@ -221,7 +207,6 @@ def test_problem_surviving_into_the_proposal_becomes_an_open_note(tmp_path):
     assert result.status == "ready_with_notes"
     assert any("клише" in note for note in result.open_notes)
     assert (post_dir / "output" / "post.md").read_text(encoding="utf-8").strip() == "Предложение, което още куца."
-
 
 def test_gdpr_finding_is_an_agenda_item_and_then_an_open_note(tmp_path):
     post_dir = tmp_path / "post"
@@ -244,7 +229,6 @@ def test_gdpr_finding_is_an_agenda_item_and_then_an_open_note(tmp_path):
     assert "GDPR" in client.prompts[Role.WRITER][1]
     assert any("организация без потвърдено съгласие" in note for note in result.open_notes)
     assert result.status == "ready_with_notes"
-
 
 def test_no_critique_verdict_raises(tmp_path):
     """Регресионна ограда: нито една от трите присъди не бива да хвърля изключение."""
@@ -271,9 +255,7 @@ def test_no_critique_verdict_raises(tmp_path):
 
         assert result.post_path.exists()
 
-
 # --------------------------------------------------------------- подсигуряване на стъпки 5–7
-
 
 def test_broken_second_post_falls_back_to_post_i(tmp_path):
     post_dir = tmp_path / "post"
@@ -291,7 +273,6 @@ def test_broken_second_post_falls_back_to_post_i(tmp_path):
     assert any("Вторият пост не беше написан" in note for note in result.open_notes)
     assert result.post_path.exists()
 
-
 def test_broken_consolidator_still_leaves_a_proposal(tmp_path):
     post_dir = tmp_path / "post"
     _write_briefing(post_dir)
@@ -305,7 +286,6 @@ def test_broken_consolidator_still_leaves_a_proposal(tmp_path):
 
     assert (post_dir / "output" / "post.md").read_text(encoding="utf-8").strip() == "Пост II."
     assert any("Консолидаторът не успя" in note for note in result.open_notes)
-
 
 def test_broken_final_check_does_not_lose_the_proposal(tmp_path):
     post_dir = tmp_path / "post"
@@ -321,9 +301,7 @@ def test_broken_final_check_does_not_lose_the_proposal(tmp_path):
     assert (post_dir / "output" / "post.md").read_text(encoding="utf-8").strip() == "Предложение."
     assert any("Финалната проверка не успя" in note for note in result.open_notes)
 
-
 # --------------------------------------------------------------- механични правила
-
 
 def test_mechanical_rules_are_applied_to_the_proposal_before_it_is_written(tmp_path):
     """
@@ -360,7 +338,6 @@ def test_mechanical_rules_are_applied_to_the_proposal_before_it_is_written(tmp_p
     final_check_prompt = client.prompts[Role.CRITIC][1]
     assert "#ИКТ" not in final_check_prompt  # Критикът чете поправения текст
 
-
 def test_no_fixes_when_the_proposal_is_already_clean(tmp_path):
     post_dir = tmp_path / "post"
     _write_briefing(post_dir)
@@ -378,9 +355,7 @@ def test_no_fixes_when_the_proposal_is_already_clean(tmp_path):
     assert result.applied_fixes == []
     assert result.status == "ready"
 
-
 # --------------------------------------------------------------- снимки
-
 
 def test_possible_minor_photo_is_a_warning_not_a_stopping_condition(tmp_path):
     """От 2026-08-10: снимка с вероятно непълнолетни е предупреждение в meta.json/run.log,

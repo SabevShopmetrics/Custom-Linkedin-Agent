@@ -180,3 +180,57 @@ def test_check_connection_reports_per_model_status_without_raising(monkeypatch):
     assert results["planner"]["ok"] is True
     assert results["media"]["ok"] is False
     assert "media моделът е зает" in results["media"]["error"]
+
+
+# --------------------------------------------------------------- план 11, Фаза 1
+# Параметри на извадката. Съзнателното изискване: докато не са зададени, заявката е
+# ТОЧНО каквато беше — сегашната верига има 20 реални пускания като евиденция и не бива
+# да смени поведението си, защото е добавена настройка.
+
+
+def test_request_payload_is_unchanged_when_no_sampling_params_are_set(monkeypatch):
+    captured: dict = {}
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        captured.update(json)
+        return content_response("текст")
+
+    monkeypatch.setattr(requests, "post", fake_post)
+    client = LLMClient(make_config())
+
+    client.complete(Role.WRITER, "бриф")
+
+    assert set(captured) == {"model", "messages"}
+
+
+def test_seed_and_temperature_from_config_reach_the_request(monkeypatch):
+    captured: dict = {}
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        captured.update(json)
+        return content_response("текст")
+
+    monkeypatch.setattr(requests, "post", fake_post)
+    client = LLMClient(make_config(seed=42, temperature=0.7, max_tokens=800))
+
+    client.complete(Role.WRITER, "бриф")
+
+    assert captured["seed"] == 42
+    assert captured["temperature"] == 0.7
+    assert captured["max_tokens"] == 800
+
+
+def test_per_call_temperature_overrides_the_configured_one(monkeypatch):
+    """Нужно за кандидати с различна температура (process-4, стъпка 2)."""
+    captured: dict = {}
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        captured.update(json)
+        return content_response("текст")
+
+    monkeypatch.setattr(requests, "post", fake_post)
+    client = LLMClient(make_config(temperature=0.2))
+
+    client.complete(Role.WRITER, "бриф", temperature=1.1)
+
+    assert captured["temperature"] == 1.1

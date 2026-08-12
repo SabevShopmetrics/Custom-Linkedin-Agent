@@ -24,9 +24,6 @@ from src.repl import (
 )
 from tests.conftest import make_brand_knowledge, make_config
 
-import pytest
-
-
 class FakePipeline:
     """Записва извикванията и пише output/post.md, както прави истинският Консолидатор."""
 
@@ -51,7 +48,6 @@ class FakePipeline:
             warnings=self.warnings,
         )
 
-
 class FakeClient:
     def __init__(self, config) -> None:
         self.config = config
@@ -59,7 +55,6 @@ class FakeClient:
 
     def check_connection(self) -> dict:
         return {"planner": {"model": "planner-model", "ok": True, "duration_seconds": 0.1}}
-
 
 def make_repl(tmp_path: Path, pipeline: FakePipeline, lines: list[str]) -> tuple[Repl, list[str]]:
     output: list[str] = []
@@ -84,17 +79,13 @@ def make_repl(tmp_path: Path, pipeline: FakePipeline, lines: list[str]) -> tuple
     )
     return repl, output
 
-
 # --------------------------------------------------------------------------- имена
-
 
 def test_slugify_transliterates_cyrillic():
     assert slugify("Стажантска програма 2026 в клъстера") == "stazhantska-programa-2026-v-klastera"
 
-
 def test_slugify_falls_back_when_nothing_usable():
     assert slugify("!!! ???") == "post"
-
 
 def test_unique_post_dir_suffixes_on_collision(tmp_path):
     posts = tmp_path / "posts"
@@ -105,9 +96,7 @@ def test_unique_post_dir_suffixes_on_collision(tmp_path):
     assert first.name == "2026-08-11-praktiki"
     assert second.name == "2026-08-11-praktiki-2"
 
-
 # --------------------------------------------------------------------------- снимки
-
 
 def test_resolve_attachments_expands_dir_and_skips_non_photos(tmp_path):
     photos = tmp_path / "снимки"
@@ -121,7 +110,6 @@ def test_resolve_attachments_expands_dir_and_skips_non_photos(tmp_path):
     assert [p.name for p in found] == ["a.jpg", "b.png"]
     assert unresolved == [str(tmp_path / "няма.jpg")]
 
-
 def test_extract_inline_attachments_keeps_unresolvable_token_as_text(tmp_path):
     photo = tmp_path / "екип.jpg"
     photo.write_bytes(b"x")
@@ -133,9 +121,7 @@ def test_extract_inline_attachments_keeps_unresolvable_token_as_text(tmp_path):
     assert str(photo) not in text
     assert unresolved == ["всички"]
 
-
 # --------------------------------------------------------------------------- поток
-
 
 def test_brief_creates_post_dir_and_runs_pipeline(tmp_path):
     pipeline = FakePipeline()
@@ -149,7 +135,6 @@ def test_brief_creates_post_dir_and_runs_pipeline(tmp_path):
     assert (post_dir / "briefing.md").read_text(encoding="utf-8").strip() == "Стажантска програма 2026"
     assert pipeline.calls[0]["force"] is False
     assert "Готов пост." in "\n".join(output)
-
 
 def test_knowledge_is_loaded_once_and_passed_to_every_run(tmp_path):
     """Ефективността на интерактивния режим е точно в това — knowledge/ не се чете наново."""
@@ -169,7 +154,6 @@ def test_knowledge_is_loaded_once_and_passed_to_every_run(tmp_path):
     assert len(pipeline.calls) == 2
     assert pipeline.calls[0]["knowledge"] is pipeline.calls[1]["knowledge"]
 
-
 def test_inline_photo_is_copied_into_post_photos(tmp_path):
     photo = tmp_path / "екип.jpg"
     photo.write_bytes(b"x")
@@ -182,7 +166,6 @@ def test_inline_photo_is_copied_into_post_photos(tmp_path):
     assert (post_dir / "photos" / "екип.jpg").exists()
     assert "@" not in (post_dir / "briefing.md").read_text(encoding="utf-8")
 
-
 def test_attach_then_brief_uses_attachments_and_clears_them(tmp_path):
     photo = tmp_path / "a.jpg"
     photo.write_bytes(b"x")
@@ -194,7 +177,6 @@ def test_attach_then_brief_uses_attachments_and_clears_them(tmp_path):
     first_dir, second_dir = pipeline.calls[0]["post_dir"], pipeline.calls[1]["post_dir"]
     assert (first_dir / "photos" / "a.jpg").exists()
     assert list((second_dir / "photos").iterdir()) == []  # прикачените не се пренасят към следващия пост
-
 
 def test_revise_appends_to_same_briefing_and_forces_rerun(tmp_path):
     pipeline = FakePipeline()
@@ -209,7 +191,6 @@ def test_revise_appends_to_same_briefing_and_forces_rerun(tmp_path):
     assert "Бележка за ревизия 1" in briefing
     assert "по-кратко, без клишета" in briefing
 
-
 def test_revise_without_post_does_not_call_pipeline(tmp_path):
     pipeline = FakePipeline()
     repl, output = make_repl(tmp_path, pipeline, ["/revise нещо"])
@@ -219,7 +200,6 @@ def test_revise_without_post_does_not_call_pipeline(tmp_path):
     assert pipeline.calls == []
     assert "напиши бриф" in "\n".join(output)
 
-
 def test_again_reruns_same_dir_with_force(tmp_path):
     pipeline = FakePipeline()
     repl, _ = make_repl(tmp_path, pipeline, ["Стажантска програма", "/again"])
@@ -228,7 +208,6 @@ def test_again_reruns_same_dir_with_force(tmp_path):
 
     assert pipeline.calls[1]["post_dir"] == pipeline.calls[0]["post_dir"]
     assert pipeline.calls[1]["force"] is True
-
 
 def test_agent_error_is_shown_as_sentence_not_traceback(tmp_path):
     pipeline = FakePipeline(raises=BriefingMissingError("posts/x"))
@@ -240,7 +219,6 @@ def test_agent_error_is_shown_as_sentence_not_traceback(tmp_path):
     assert "Спряно:" in text
     assert "briefing.md" in text
     assert "Traceback" not in text
-
 
 def test_text_from_an_interrupted_run_is_still_shown(tmp_path):
     """
@@ -264,7 +242,6 @@ def test_text_from_an_interrupted_run_is_still_shown(tmp_path):
     assert "прекъснато пускане" in text
     assert "Спряно:" in text
 
-
 def test_unexpected_error_does_not_end_the_session(tmp_path):
     pipeline = FakePipeline(raises=OSError("диск пълен"))
     repl, output = make_repl(tmp_path, pipeline, ["Първи бриф", "Втори бриф"])
@@ -274,7 +251,6 @@ def test_unexpected_error_does_not_end_the_session(tmp_path):
     text = "\n".join(output)
     assert "Неочаквана грешка: OSError" in text
     assert len(pipeline.calls) == 2  # сесията продължава след счупения пост
-
 
 def test_warnings_are_printed_after_the_post(tmp_path):
     pipeline = FakePipeline(warnings=["Снимка с вероятно непълнолетни лица."])
@@ -286,7 +262,6 @@ def test_warnings_are_printed_after_the_post(tmp_path):
     assert "Снимка с вероятно непълнолетни лица." in text
     assert text.index("Готов пост.") < text.index("Снимка с вероятно непълнолетни")
 
-
 def test_backslash_continues_the_brief_on_next_line(tmp_path):
     pipeline = FakePipeline()
     repl, _ = make_repl(tmp_path, pipeline, ["Първа част \\", "втора част"])
@@ -295,7 +270,6 @@ def test_backslash_continues_the_brief_on_next_line(tmp_path):
 
     briefing = (pipeline.calls[0]["post_dir"] / "briefing.md").read_text(encoding="utf-8")
     assert briefing.strip() == "Първа част\nвтора част"
-
 
 def test_unknown_command_does_not_become_a_brief(tmp_path):
     pipeline = FakePipeline()
@@ -306,7 +280,6 @@ def test_unknown_command_does_not_become_a_brief(tmp_path):
     assert pipeline.calls == []
     assert "Непозната команда" in "\n".join(output)
 
-
 def test_exit_stops_the_loop_before_remaining_input(tmp_path):
     pipeline = FakePipeline()
     repl, _ = make_repl(tmp_path, pipeline, ["/exit", "Този бриф не бива да се изпълни"])
@@ -314,7 +287,6 @@ def test_exit_stops_the_loop_before_remaining_input(tmp_path):
     repl.run()
 
     assert pipeline.calls == []
-
 
 def test_config_error_exits_with_code_1(tmp_path):
     from src.config import ConfigError
@@ -336,7 +308,6 @@ def test_config_error_exits_with_code_1(tmp_path):
 
     assert repl.run() == 1
     assert "OPENWEBUI_API_KEY" in "\n".join(output)
-
 
 def test_progress_lines_reach_the_console_during_a_run(tmp_path):
     """
@@ -370,7 +341,6 @@ def test_progress_lines_reach_the_console_during_a_run(tmp_path):
     assert "Папката photos/ е празна" in text
     assert "този ред е шум" not in text
     assert "Финален статус" not in text
-
 
 def test_persistent_handler_is_removed_after_the_session(tmp_path):
     """Сесията не бива да остави handler зад себе си — иначе `generate` в същия процес

@@ -113,7 +113,20 @@ python -m src.cli generate posts/2026-07-praktiki
 
 # преизчисли всички стъпки наново, независимо кои файлове вече съществуват
 python -m src.cli generate posts/2026-07-praktiki --force
+
+# измери качеството на вече направените пускания (без нито едно извикване към модел)
+python -m src.cli bench
+
+# сравни с по-стара базова линия — само разликата има значение, виж bench/README.md
+python -m src.cli bench --only bench- --compare bench/baseline-pre-phase0.json
 ```
+
+`bench` мери три неща за всеки текст: **абсолютен брой факти** (собствени имена + числа),
+**плътност** (факти на 100 думи) и **дял празни изречения** — и ги сравнява с референтната
+лента от дословните постове в `knowledge/examples/good/`. Показва Post I → Post II →
+предложение, за да е видно коя стъпка добавя конкретност и коя маха. Подробно:
+[bench/README.md](bench/README.md) и
+[план 11](docs/research-plans/research-plan-11-text-quality.md).
 
 ## Структура
 
@@ -132,13 +145,15 @@ posts/<име>/     # един пост = една папка; briefing.md + pho
 src/
   config.py      # чете .env
   errors.py      # всички грешки — всяка носи ясно съобщение какво да направи човек
-  cli.py         # chat (по подразбиране) / generate / new / check / check-knowledge
+  cli.py         # chat (по подразбиране) / generate / new / check / check-knowledge / bench
   repl.py        # интерактивната сесия
   terminal.py    # UTF-8 вход/изход на Windows
   logging_utils.py  # setup_run_logger() — пише posts/<име>/run.log
   llm/           # HTTP клиент към Open WebUI, роля→модел, валидиране на JSON изход
   brand/         # зарежда knowledge/ (loader.py) + чете механичните правила (format_rules.py)
   pipeline/      # седемте стъпки + formatting.py (механичните правила) + runner.py
+  quality/       # metrics.py (какво се брои в един пост) + bench.py (базова линия)
+bench/           # контролиран набор брифове + записани базови линии
 tests/
 ```
 
@@ -179,6 +194,16 @@ pytest
 раздел 8. Всичко останало (`identity/about.md`, `identity/history.md`, `voice/vocabulary.md`,
 `rules/*`, `strategy/*`, `examples/bad/`, повечето полета в `facts.yaml`) е още с `TODO` маркер —
 `python -m src.cli check-knowledge` показва точно какво липсва.
+
+**От 2026-08-12** (план 11, Фаза 0) файл, в който след махането на HTML коментарите не остава
+нищо, се отчита като **празен** и не влиза в промпта. Дотогава такъв файл минаваше за налична
+секция и моделът получаваше описанието „какво трябва да съдържа този файл" на мястото на
+правилото. Така стана видимо, че **9 от 11** markdown файла в `knowledge/` са заготовки —
+реално съдържание има само в `voice/tone.md` и `voice/formats.md`.
+
+От `examples/good/` в промпта влиза само секцията `## Текст на поста`, и само от файловете,
+които са **дословен** пост (5 от 12). Останалите 7 са обобщения, писани от агента — те се
+броят в `check-knowledge`, но не са еталон за подражание.
 
 ## Съзнателно извън обхвата (засега)
 

@@ -355,6 +355,23 @@ def _render_critique_markdown(critique: CritiqueSchema) -> str:
     )
 
 
+def load_critique(path: Path) -> CritiqueSchema | None:
+    """
+    Прочита записана критика от диск, или None ако файлът липсва/е неразчетим.
+
+    За разлика от `run`, тук липсващият файл НЕ е грешка: анализът на минали пускания
+    (src/quality/bench.py) минава през папки, в които стъпка 4 или 7 може да не е стигнала
+    да запише нищо, и това е самата информация, която се търси.
+    """
+    text = read_text_or_none(path)
+    if not text:
+        return None
+    try:
+        return _parse_critique_markdown(text)
+    except (ValueError, KeyError):
+        return None
+
+
 def _parse_critique_markdown(text: str) -> CritiqueSchema:
     match = _JSON_BLOCK_RE.search(text)
     if not match:

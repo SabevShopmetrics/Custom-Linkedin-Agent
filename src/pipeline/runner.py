@@ -99,7 +99,7 @@ def run_pipeline(
     log.info("[2]/[3] Писател + Media Picker (паралелно)...")
     with ThreadPoolExecutor(max_workers=2) as executor:
         draft_future = executor.submit(
-            writer.write_first_draft, post_dir, client, knowledge.stable_context, plan, briefing_text, force=force
+            writer.write_first_draft, post_dir, client, knowledge, plan, briefing_text, force=force
         )
         media_future = executor.submit(media_picker.run, post_dir, client, plan, briefing_text, force=force)
         post_i_text = draft_future.result()
@@ -123,7 +123,7 @@ def run_pipeline(
             post_ii_text = writer.write_second_post(
                 post_dir,
                 client,
-                knowledge.stable_context,
+                knowledge,
                 plan,
                 briefing_text,
                 post_i_text,

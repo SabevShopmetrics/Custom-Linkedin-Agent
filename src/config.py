@@ -34,6 +34,18 @@ class Config:
     model_max_retries: int = 3
     invalid_response_max_retries: int = 2
 
+    # Параметри на извадката. `None` значи „не се изпраща в заявката" — тоест поведението
+    # по подразбиране е точно както преди въвеждането им (план 11, Фаза 1: находка 2.7).
+    # Нарочно е така: сегашната верига има 20 реални пускания като евиденция и не бива да
+    # смени поведението си, защото е добавена настройка.
+    #
+    # SEED е основната причина полетата да съществуват: без него две пускания със същия
+    # бриф дават различен текст и всяко сравнение „преди/след" е несигурно. TEMPERATURE
+    # става нужна във Фаза 3 (кандидати с различна температура).
+    temperature: float | None = None
+    seed: int | None = None
+    max_tokens: int | None = None
+
     # лимит за размер на снимка, изпращана към vision модел, преди ImageTooLargeError
     max_image_bytes: int = 4 * 1024 * 1024
 
@@ -79,6 +91,21 @@ def load_config(env_path: Path | None = None) -> Config:
         except ValueError as exc:
             raise ConfigError(f"'{name}' в .env трябва да е цяло число, получено: '{raw}'") from exc
 
+    def _optional_int_env(name: str) -> int | None:
+        raw = os.environ.get(name)
+        if not raw or not raw.strip():
+            return None
+        return _int_env(name, 0)
+
+    def _optional_float_env(name: str) -> float | None:
+        raw = os.environ.get(name)
+        if not raw or not raw.strip():
+            return None
+        try:
+            return float(raw)
+        except ValueError as exc:
+            raise ConfigError(f"'{name}' в .env трябва да е число, получено: '{raw}'") from exc
+
     return Config(
         openwebui_base_url=os.environ["OPENWEBUI_BASE_URL"].rstrip("/"),
         openwebui_api_key=os.environ["OPENWEBUI_API_KEY"],
@@ -91,4 +118,7 @@ def load_config(env_path: Path | None = None) -> Config:
         request_timeout_seconds=_int_env("REQUEST_TIMEOUT_SECONDS", 120),
         model_max_retries=_int_env("MODEL_MAX_RETRIES", 3),
         invalid_response_max_retries=_int_env("INVALID_RESPONSE_MAX_RETRIES", 2),
+        temperature=_optional_float_env("TEMPERATURE"),
+        seed=_optional_int_env("SEED"),
+        max_tokens=_optional_int_env("MAX_TOKENS"),
     )

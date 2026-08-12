@@ -23,6 +23,7 @@ import re
 from dataclasses import dataclass, field
 
 from src.brand.format_rules import (
+    MONTHS,
     FormatRules,
     count_words,
     extract_emoji,
@@ -33,10 +34,6 @@ from src.brand.format_rules import (
 LINK_PLACEHOLDER = "[линк]"
 
 _DIGIT_RE = re.compile(r"\d")
-_MONTHS = (
-    "януари", "февруари", "март", "април", "май", "юни",
-    "юли", "август", "септември", "октомври", "ноември", "декември",
-)
 
 
 @dataclass
@@ -145,7 +142,7 @@ def _opening_has_a_fact(text: str) -> bool:
     """Корпусът иска отваряне с число, дата или място. Числото и месецът са проверими."""
     first_line = next((line for line in text.splitlines() if line.strip()), "")
     lowered = first_line.lower()
-    return bool(_DIGIT_RE.search(first_line)) or any(month in lowered for month in _MONTHS)
+    return bool(_DIGIT_RE.search(first_line)) or any(month in lowered for month in MONTHS)
 
 
 def enforce(text: str, rules: FormatRules, *, brief_text: str = "") -> FormattingResult:
