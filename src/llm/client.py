@@ -26,7 +26,7 @@ from pydantic import BaseModel
 
 from src.config import Config
 from src.errors import ImageTooLargeError, InvalidResponseError, ModelUnavailableError
-from src.llm.roles import Role, model_for_role, supports_vision
+from src.llm.roles import Role, fallback_chain, model_for_role, supports_vision
 from src.llm.schema import parse_structured
 
 # "Expecting ',' delimiter" / "Expecting ':' delimiter" почти винаги значат неескейпната
@@ -298,7 +298,10 @@ class LLMClient:
         self, role: Role, model: str, messages: list[dict[str, Any]], temperature: float | None = None
     ) -> tuple[str, int, bool]:
         """
-        Retry с нарастващо изчакване на основния модел, после един опит с fallback модела.
+        Retry с нарастващо изчакване на основния модел, после по един опит с всеки
+        останал конфигуриран модел (MODEL_FALLBACK, после другите роли по низходяща
+        близост до `role` — виж roles.fallback_chain). Целта: конвейерът пада само ако
+        БУКВАЛНО никой конфигуриран модел не отговаря.
         Връща (текст, брой_опити, дали_е_ползван_fallback).
         """
         attempts = 0
@@ -315,15 +318,18 @@ class LLMClient:
                 if attempt < self._config.model_max_retries - 1:
                     self._sleep(2**attempt)
 
-        # основният модел е изчерпан — един опит с fallback, ако не е самият той fallback-ът
-        if model != self._config.model_fallback:
+        # основният модел е изчерпан — по един опит с всеки останал модел от веригата,
+        # в ред на подходящост за тази роля, докато някой отговори.
+        for fb_model in fallback_chain(role, self._config):
+            if fb_model == model:
+                continue
             attempts += 1
             try:
-                return self._post_chat(self._config.model_fallback, messages, temperature), attempts, True
+                return self._post_chat(fb_model, messages, temperature), attempts, True
             except Exception as exc:
                 last_exc = exc
 
-        # Нито основният, нито fallback моделът отговориха — цялата верига да гърми оттук.
+        # Нито основният, нито някой резервен модел отговори — цялата верига да гърми оттук.
         raise ModelUnavailableError(role.value, model, attempts, detail=str(last_exc) if last_exc else None)
 
     def _sampling_payload(self, temperature: float | None) -> dict[str, Any]:
