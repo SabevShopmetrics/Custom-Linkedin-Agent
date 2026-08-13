@@ -1,5 +1,5 @@
 """
-Терминален вход/изход на UTF-8. Windows-специфично, но безвредно на Linux/Mac.
+Терминален вход/изход на UTF-8 + цветове. Windows-специфично, но безвредно на Linux/Mac.
 
 Windows конзолата по подразбиране е cp1252/cp866 — кирилица на изхода гърми, а
 кирилица на ВХОДА се декодира с грешен codec и стига до Python като surrogate
@@ -27,6 +27,18 @@ def force_utf8_io() -> None:
                 reconfigure(encoding="utf-8")
             else:
                 reconfigure(encoding="utf-8", errors=errors)
+        except Exception:  # pragma: no cover — най-добро усилие, никога не бива да чупи CLI-то
+            pass
+
+    # rich (src/repl.py, Ink) генерира ANSI кодове безусловно щом веднъж е решено, че
+    # терминалът поддържа цвят — на модерен Windows Terminal/PowerShell 7 това работи
+    # директно, но остарелият conhost.exe (класическото cmd.exe) не включва ANSI по
+    # подразбиране без този извикване, и показва суров escape код вместо цвят.
+    if sys.platform.startswith("win"):
+        try:
+            import colorama
+
+            colorama.just_fix_windows_console()
         except Exception:  # pragma: no cover — най-добро усилие, никога не бива да чупи CLI-то
             pass
 

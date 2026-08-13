@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import date
 from pathlib import Path
 
@@ -16,6 +17,7 @@ from src.errors import BriefingMissingError, ModelUnavailableError
 from src.pipeline.consolidator import PipelineResult
 from src.repl import (
     Ink,
+    ProgressHandler,
     Repl,
     extract_inline_attachments,
     resolve_attachments,
@@ -280,6 +282,61 @@ def test_unknown_command_does_not_become_a_brief(tmp_path):
     assert pipeline.calls == []
     assert "Непозната команда" in "\n".join(output)
 
+def test_bare_keyword_opens_the_wizard_without_a_slash(tmp_path):
+    """
+    Потребителска заявка 2026-08-12: /wizard трябва да се отваря и с кратка ключова дума,
+    не само през слаш-команда, за човек, който не се сеща за командния синтаксис.
+    """
+    photo = tmp_path / "a.jpg"
+    photo.write_bytes(b"x")
+    pipeline = FakePipeline()
+    repl, output = make_repl(tmp_path, pipeline, [f"/attach {photo}", "нов", "Проведохме среща"])
+
+    repl.run()
+
+    assert any("Нов пост" in line for line in output)
+    assert len(pipeline.calls) == 1
+    briefing = (pipeline.calls[0]["post_dir"] / "briefing.md").read_text(encoding="utf-8")
+    assert briefing.strip() == "Проведохме среща"
+
+
+def test_bare_wizard_word_also_opens_the_wizard(tmp_path):
+    photo = tmp_path / "a.jpg"
+    photo.write_bytes(b"x")
+    pipeline = FakePipeline()
+    repl, _ = make_repl(tmp_path, pipeline, [f"/attach {photo}", "wizard", "Проведохме среща"])
+
+    repl.run()
+
+    assert len(pipeline.calls) == 1
+    briefing = (pipeline.calls[0]["post_dir"] / "briefing.md").read_text(encoding="utf-8")
+    assert briefing.strip() == "Проведохме среща"
+
+
+def test_a_random_one_word_brief_is_not_mistaken_for_the_wizard_keyword(tmp_path):
+    """Само точните ключови думи ('нов', 'wizard') отварят уизарда — не всеки кратък бриф."""
+    pipeline = FakePipeline()
+    repl, _ = make_repl(tmp_path, pipeline, ["Практики"])
+
+    repl.run()
+
+    assert len(pipeline.calls) == 1
+    briefing = (pipeline.calls[0]["post_dir"] / "briefing.md").read_text(encoding="utf-8")
+    assert briefing.strip() == "Практики"
+
+
+def test_a_real_brief_starting_with_the_keyword_word_is_not_hijacked(tmp_path):
+    """Точно съвпадение на целия ред, не префикс — 'Нов член...' е истински бриф, не команда."""
+    pipeline = FakePipeline()
+    repl, _ = make_repl(tmp_path, pipeline, ["Нов член се присъедини към клъстера"])
+
+    repl.run()
+
+    assert len(pipeline.calls) == 1
+    briefing = (pipeline.calls[0]["post_dir"] / "briefing.md").read_text(encoding="utf-8")
+    assert briefing.strip() == "Нов член се присъедини към клъстера"
+
+
 def test_exit_stops_the_loop_before_remaining_input(tmp_path):
     pipeline = FakePipeline()
     repl, _ = make_repl(tmp_path, pipeline, ["/exit", "Този бриф не бива да се изпълни"])
@@ -341,6 +398,57 @@ def test_progress_lines_reach_the_console_during_a_run(tmp_path):
     assert "Папката photos/ е празна" in text
     assert "този ред е шум" not in text
     assert "Финален статус" not in text
+
+
+def _emit_via_handler(handler: ProgressHandler, *, level: int, message: str) -> None:
+    record = logging.LogRecord("test", level, __file__, 0, message, None, None)
+    handler.emit(record)
+
+
+def test_progress_handler_groups_lines_under_a_bold_step_header(tmp_path):
+    """
+    2026-08-12: логовете вече се групират по стъпка, не са плосък поток — нов таг
+    ("[4]") отваря удебелена секция, детайли под него (със или без собствен таг) висят
+    отдолу с отстъп, докато не тръгне следваща стъпка.
+    """
+    output: list[str] = []
+    handler = ProgressHandler(output.append, Ink(enabled=False))
+
+    _emit_via_handler(handler, level=logging.INFO, message="[4] Критик върху Post I...")
+    _emit_via_handler(handler, level=logging.INFO, message="[4] присъда: needs_revision · 1 находки за запълване")
+    _emit_via_handler(handler, level=logging.INFO, message="[4] находка: GDPR — махни това от текста")
+    _emit_via_handler(handler, level=logging.INFO, message="[5] Писател → Post II (запълва 1 находки)...")
+
+    assert output == [
+        "",
+        "▸ [4] Критик върху Post I...",
+        "    · присъда: needs_revision · 1 находки за запълване",
+        "    · находка: GDPR — махни това от текста",
+        "",
+        "▸ [5] Писател → Post II (запълва 1 находки)...",
+    ]
+
+
+def test_progress_handler_marks_warning_lines_with_a_different_bullet(tmp_path):
+    output: list[str] = []
+    handler = ProgressHandler(output.append, Ink(enabled=False))
+
+    _emit_via_handler(handler, level=logging.INFO, message="[6б] Механични правила...")
+    _emit_via_handler(
+        handler, level=logging.WARNING, message="[6б] Правило от корпуса, което кодът не може да наложи: X"
+    )
+
+    assert output[-1] == "    ⚠ Правило от корпуса, което кодът не може да наложи: X"
+
+
+def test_progress_handler_still_suppresses_pure_noise_lines(tmp_path):
+    output: list[str] = []
+    handler = ProgressHandler(output.append, Ink(enabled=False))
+
+    _emit_via_handler(handler, level=logging.INFO, message="=== Ново пускане ===")
+    _emit_via_handler(handler, level=logging.WARNING, message="Открит въпрос: нещо")
+
+    assert output == []
 
 def test_persistent_handler_is_removed_after_the_session(tmp_path):
     """Сесията не бива да остави handler зад себе си — иначе `generate` в същия процес

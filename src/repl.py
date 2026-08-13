@@ -46,6 +46,19 @@ output/meta.json, и споделен клиент би записал в meta.j
   - Банерът при старт показва реални числа от заредения корпус (членове, еталонни
     постове), не само име — за да е ясно от първия ред, че сесията не е празен чат,
     а зареден с контекст за конкретна организация.
+
+От 2026-08-12, трета итерация (потребителска заявка — "нов" колкото ключова дума за
+отваряне на уизарда, и по-подробни, подредени логове, не само номер на стъпка):
+
+  - Бара дума `нов` (или `wizard`, без слаш) отваря /wizard — не изисква запомняне на
+    команден синтаксис (виж _WIZARD_KEYWORDS). `/wizard`/`/w` остават като преди.
+  - `/wizard` вече показва кратко удебелено заглавие ("▸ Нов пост") при отваряне и
+    потвърждение ("Разбрах — тръгвам.") преди да подаде брифа на конвейера.
+  - ProgressHandler вече групира логовете по стъпка вместо плосък поток: нов таг
+    ("[4]", "[6б]"...) отваря удебелена секция, всичко докладвано вътре в нея (план,
+    находки, избрани снимки, поправки, открити въпроси) виси отдолу с отстъп. Самите
+    runner.py логове носят повече съдържание — не само "Критик готово: 3 находки", а
+    и самите три находки, ред по ред (виж src/pipeline/runner.py).
 """
 
 from __future__ import annotations
@@ -64,6 +77,10 @@ from datetime import date
 from pathlib import Path
 from typing import Callable, Iterable
 
+from rich.console import Console
+from rich.panel import Panel
+from rich.text import Text
+
 from src.brand.loader import BrandKnowledge, audit_knowledge, load_brand_knowledge
 from src.config import Config, ConfigError, load_config
 from src.errors import AgentError
@@ -80,6 +97,11 @@ ENV_EXAMPLE_PATH = Path(".env.example")
 PROMPT = "› "
 CONTINUATION_PROMPT = "  "
 
+# Кратки, естествени думи, които отварят /wizard без слаш — за човек, който не се сеща
+# за командния синтаксис. И двете са безсмислени като самостоятелен бриф за пост, затова
+# еднозначно се разпознават като команда, не като текст за писане.
+_WIZARD_KEYWORDS = {"нов", "wizard"}
+
 HELP_TEXT = """\
 Пиши брифа на един ред и натисни Enter — агентът генерира поста. Нищо друго не пита:
 кого да спомене безопасно, чувствителен ли е постът, какъв тон да ползва — това си е
@@ -87,7 +109,7 @@ HELP_TEXT = """\
 Ред, завършващ с \\, продължава на следващия (за по-дълъг бриф).
 Снимка се прикачва с @път вътре в брифа, с /attach, или просто я провлачи при /wizard.
 
-  /wizard [бриф]    като обикновен ред, но пита за снимки, ако още няма нито една
+  нов               (или /wizard, /w) — като обикновен ред, но пита за снимки при нужда
   /attach <път> …   прикачва снимка, папка със снимки или маска (*.jpg)
   /photos           показва прикаченото; /photos clear го изчиства
   /revise <текст>   пренаписва последния пост с допълнителна инструкция
@@ -106,33 +128,76 @@ HELP_TEXT = """\
 
 # --------------------------------------------------------------------------- цветове
 
+# force_terminal=True: решението "има ли изобщо цвят" е взето от colors_enabled() при
+# конструирането на Ink — веднъж влязъл тук, текстът трябва да се оцвети безусловно.
+# width е нарочно огромна: стиловете тук са единични думи/фрази с no_wrap=True, никога
+# цял абзац — не искаме rich да пренася ред по средата на къс статус етикет.
+_STYLE_CONSOLE = Console(force_terminal=True, color_system="truecolor", width=4096, highlight=False)
+
+
+def _panel_console() -> Console:
+    """Отделна конзола за panel(), с реалната ширина на терминала (в разумни граници)."""
+    width = min(shutil.get_terminal_size((80, 24)).columns, 100)
+    return Console(force_terminal=True, color_system="truecolor", width=width, highlight=False)
+
 
 @dataclass(frozen=True)
 class Ink:
-    """Минимален ANSI слой. При `enabled=False` всеки метод връща текста непокътнат."""
+    """
+    Стилов слой върху `rich` — 8-цветен ANSI (както преди) изглежда изпран на всеки
+    съвременен терминал; rich носи истински truecolor и коректна поддръжка на Windows
+    без ръчна работа. При `enabled=False` всеки метод връща текста НЕПОКЪТНАТ — това е
+    контрактът, на който стъпват тестовете (NO_COLOR, не-tty изход, `Ink(enabled=False)`).
+
+    Безопасно за произволно съдържание (пост от модел, бриф, съобщение за грешка):
+    `rich.text.Text` НЕ парсва markup — низ като „[линк]" минава дословно, за разлика от
+    `console.print("[линк]")`, което rich би се опитало да разчете като таг.
+    """
 
     enabled: bool = True
 
-    def _wrap(self, code: str, text: str) -> str:
-        return f"\033[{code}m{text}\033[0m" if self.enabled else text
+    def _wrap(self, text: str, style: str) -> str:
+        if not self.enabled:
+            return text
+        with _STYLE_CONSOLE.capture() as capture:
+            _STYLE_CONSOLE.print(Text(text, style=style, no_wrap=True), end="")
+        return capture.get()
 
     def dim(self, text: str) -> str:
-        return self._wrap("2", text)
+        return self._wrap(text, "grey62")
 
     def bold(self, text: str) -> str:
-        return self._wrap("1", text)
+        return self._wrap(text, "bold")
 
     def ok(self, text: str) -> str:
-        return self._wrap("32", text)
+        return self._wrap(text, "bold green3")
 
     def warn(self, text: str) -> str:
-        return self._wrap("33", text)
+        return self._wrap(text, "bold orange3")
 
     def err(self, text: str) -> str:
-        return self._wrap("31", text)
+        return self._wrap(text, "bold red3")
 
     def accent(self, text: str) -> str:
-        return self._wrap("36", text)
+        return self._wrap(text, "bold cyan3")
+
+    def panel(self, body: str, *, title: str = "", border_style: str = "cyan3") -> str:
+        """
+        Рамка около важен блок текст (готовия пост, банера) — центърът на визуалната
+        разлика спрямо обикновен ред в терминала. При `enabled=False` пада обратно към
+        обикновена хоризонтална черта, за да не се чупят тестове/NO_COLOR/не-tty изход,
+        писани срещу плоския текстов формат.
+        """
+        if not self.enabled:
+            rule = "─" * 60
+            header = f"{title}\n" if title else ""
+            return f"{header}{rule}\n{body}\n{rule}"
+        console = _panel_console()
+        with console.capture() as capture:
+            console.print(
+                Panel(Text(body, style="none"), title=title or None, border_style=border_style, expand=True)
+            )
+        return capture.get().rstrip("\n")
 
 
 def colors_enabled(stream=None) -> bool:
@@ -268,31 +333,54 @@ def copy_attachments(attachments: Iterable[Path], photos_dir: Path) -> list[str]
 # run.log си остава пълен — тук се реже само екранът.
 _SUPPRESSED_LOG_PREFIXES = (
     "===",  # разделителят "Ново пускане ..."
-    "GDPR предупреждение:",  # runner.py логва находките и втори път, накуп
     "Спряно:",  # следва го human_message на AgentError, дословно същото
     "Финален статус:",  # резюмето след поста го казва по-кратко
-    "Открит въпрос:",  # излиза накуп след поста, където му е мястото
+    "Открит въпрос:",  # обобщаващ дублат в края — всеки вече е показан inline под своята стъпка (виж runner.py)
     "Папката 'photos/'",  # media_picker логва празната папка, runner я логва пак
 )
 
+# Разпознава водещия таг на стъпка в лог съобщение — "[1]", "[2]/[3]", "[6б]", "[7]".
+# Ред със същия таг като предишния е ДЕТАЙЛ на текущата стъпка (показва се на отделен
+# ред, с отстъп); нов таг отваря нова секция с удебелено заглавие. Ред без таг изобщо
+# (напр. отделна находка, вече отстъпена от runner.py) също се третира като детайл на
+# текущата отворена секция — идва хронологично веднага след нея.
+_STEP_TAG_RE = re.compile(r"^(\[[^\]]+\](?:/\[[^\]]+\])?)\s*")
+
 
 class ProgressHandler(logging.Handler):
-    """Показва стъпките на конвейера докато вървят — минути мълчалив терминал изглеждат
-    като забил процес."""
+    """
+    Показва стъпките на конвейера докато вървят, групирани по секции — минути мълчалив
+    терминал изглеждат като забил процес, а плосък поток от редове без структура е също
+    толкова безполезен: не личи кое принадлежи на коя стъпка. Всяка нова стъпка отваря
+    удебелено заглавие; всичко, докладвано вътре в нея (план, находки, поправки, открити
+    въпроси), виси отдолу с отстъп, докато не тръгне следваща стъпка.
+    """
 
     def __init__(self, emit_line: Callable[[str], None], ink: Ink) -> None:
         super().__init__(level=logging.INFO)
         self._emit_line = emit_line
         self._ink = ink
+        self._current_tag: str | None = None
 
     def emit(self, record: logging.LogRecord) -> None:
         message = record.getMessage()
         if message.startswith(_SUPPRESSED_LOG_PREFIXES):
             return
-        if record.levelno >= logging.WARNING:
-            self._emit_line(self._ink.warn(f"  ⚠ {message}"))
-        else:
-            self._emit_line(self._ink.dim(f"  · {message}"))
+
+        match = _STEP_TAG_RE.match(message)
+        tag = match.group(1) if match else None
+
+        if tag and tag != self._current_tag:
+            self._current_tag = tag
+            self._emit_line("")
+            self._emit_line(self._ink.bold(f"▸ {message}"))
+            return
+
+        detail = message[match.end():].strip() if match else message
+        is_warning = record.levelno >= logging.WARNING
+        bullet = "⚠" if is_warning else "·"
+        wrap = self._ink.warn if is_warning else self._ink.dim
+        self._emit_line(wrap(f"    {bullet} {detail}"))
 
 
 # --------------------------------------------------------------------------- състояние
@@ -439,22 +527,29 @@ class Repl:
         if self.knowledge.facts:
             org_name = self.knowledge.facts.get("organization", {}).get("name_bg") or org_name
 
-        self.out(self.ink.bold(f"LinkedIn агент — {org_name}"))
-        self.out(
-            self.ink.dim(
+        body = "\n".join(
+            [
                 f"Заредено: {len(self.knowledge.members)} членове · "
                 f"{len(self.knowledge.good_examples)} еталонни поста · "
-                f"писател: {self.config.model_writer}"
-            )
+                f"писател: {self.config.model_writer}",
+                "",
+                "Напиши едно изречение за какво е постът — останалото го решавам сам.",
+                "Напиши 'нов', ако искаш помощ конкретно със снимки. /help за всички команди.",
+            ]
         )
-        self.out(self.ink.dim("Напиши едно изречение за какво е постът — останалото го решавам сам."))
-        self.out(self.ink.dim("(снимки: провлачи файл или @път; /help за всички команди)"))
+        self.out(self.ink.panel(body, title=f"LinkedIn агент — {org_name}"))
         self.out("")
 
     # ------------------------------------------------------------------ команди
 
     def handle(self, line: str) -> None:
         """Разпределя един въведен ред: обикновен текст → нов пост; `/име ...` → команда."""
+        # Кратка ключова дума отваря /wizard без нужда от запомняне на слаш-синтаксис —
+        # "нов" не е разумен САМОСТОЯТЕЛЕН бриф, затова еднозначно е команда, не текст.
+        if line.strip().lower() in _WIZARD_KEYWORDS:
+            self.cmd_wizard("")
+            return
+
         if not line.startswith("/"):
             self._new_post(line)
             return
@@ -660,6 +755,7 @@ class Repl:
         тоест въпросът „кого да споменем" пазеше от риск, който кодът вече пази сам.
         Ако искаш конкретно име в поста — просто го напиши в изречението, както винаги.
         """
+        self.out(self.ink.bold("▸ Нов пост"))
         brief, inline_photos, unresolved = extract_inline_attachments(argument.strip())
         for item in unresolved:
             self.out(self.ink.dim(f"  (@{item} не е съществуваща снимка — остава като текст в брифа)"))
@@ -688,6 +784,7 @@ class Repl:
                 for item in missing:
                     self.out(self.ink.err(f"  ✗ не намерена снимка: {item}"))
 
+        self.out(self.ink.dim("  Разбрах — тръгвам."))
         self._start_post(brief, attachments)
 
     def _start_post(self, brief: str, attachments: list[Path]) -> None:
@@ -753,12 +850,13 @@ class Repl:
         self.out(self.ink.dim("  /revise <инструкция> дошлайфа този пост · нов ред = нов пост"))
 
     def _print_post(self, text: str) -> None:
-        """Текстът се печата без рамка — така се копира чист от терминала."""
-        rule = self.ink.dim("─" * 60)
+        """
+        Показва текста в рамка. Преди рамката съзнателно липсваше, за да се копира чист
+        текст с маркиране от терминала — вече ненужно съображение, защото готовият пост
+        се копира автоматично в клипборда (виж _generate), не чрез ръчно маркиране.
+        """
         self.out("")
-        self.out(rule)
-        self.out(text.strip())
-        self.out(rule)
+        self.out(self.ink.panel(text.strip(), title="Официално предложение", border_style="green3"))
 
 
 def _open_in_file_manager(path: Path) -> None:

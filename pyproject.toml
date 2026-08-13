@@ -9,6 +9,8 @@ dependencies = [
     "pydantic>=2.6",
     "Pillow>=10.2",
     "PyYAML>=6.0",
+    "rich>=13.7",
+    "colorama>=0.4.6",
 ]
 
 [project.optional-dependencies]

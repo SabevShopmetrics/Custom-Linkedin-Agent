@@ -99,7 +99,10 @@ def run_pipeline(
     # [1] Планер
     log.info("[1] Планер...")
     plan = planner.run(post_dir, client, knowledge.stable_context, briefing_text, force=force)
-    log.info("[1] Планер готово: тип=%s формат=%s чувствителен=%s", plan.post_type, plan.format, plan.is_sensitive)
+    log.info("[1] тип: %s · формат: %s · тон: %s", plan.post_type, plan.format, plan.tone)
+    log.info("[1] чувствителен: %s", "да" if plan.is_sensitive else "не")
+    if plan.notes:
+        log.info("[1] бележка на Планера: %s", plan.notes)
 
     # [2] Писател и [3] Media Picker вървят паралелно — независими една от друга
     log.info("[2]/[3] Писател + Media Picker (паралелно)...")
@@ -112,13 +115,17 @@ def run_pipeline(
         media_selection, no_photos = media_future.result()
     if no_photos:
         log.warning("Папката photos/ е празна — постът ще съдържа само текст.")
-    log.info("[2]/[3] готово: Post I %d символа, %d избрани снимки", len(post_i_text), len(media_selection.selected))
+    log.info("[2]/[3] Post I: %d думи · снимки: %d избрани", len(post_i_text.split()), len(media_selection.selected))
+    for item in media_selection.selected:
+        log.info("[2]/[3] снимка: %s — %s", item.filename, item.reason)
 
     # [4] Критик върху Post I — намира какво да запълни вторият пост
     log.info("[4] Критик върху Post I...")
     critique = critic.run(post_dir, client, knowledge, plan, briefing_text, post_i_text, force=force)
     findings = critic.collect_findings(critique)
-    log.info("[4] Критик готово: присъда=%s, %d находки за запълване", critique.verdict.value, len(findings))
+    log.info("[4] присъда: %s · %d находки за запълване", critique.verdict.value, len(findings))
+    for finding in findings:
+        log.info("[4] находка: %s", finding)
 
     # [5] Писател → Post II. Пропуска се само когато няма нито една находка — тогава няма
     # какво да запълва и втори модел ход би бил похарчен без причина.
@@ -137,7 +144,7 @@ def run_pipeline(
                 output_filename=SECOND_POST_FILENAME,
                 force=force,
             )
-            log.info("[5] Post II готово: %d символа", len(post_ii_text))
+            log.info("[5] Post II: %d думи", len(post_ii_text.split()))
         except AgentError as exc:
             # Вторият пост е подобрение, не предпоставка — без него консолидацията пада до
             # Post I, вместо целият run да остане без текст.
@@ -168,7 +175,7 @@ def run_pipeline(
             f"предложението е {merged_from[0]} без синтез."
         )
         log.error("[6] Консолидаторът се счупи: %s", exc.human_message)
-    log.info("[6] Предложение готово: %d символа, от %s", len(official_text), ", ".join(merged_from))
+    log.info("[6] предложение: %d думи · от %s", len(official_text.split()), " + ".join(merged_from))
 
     # Сравнението срещу двете чернови става СЕГА, върху необработения синтез — след
     # автоматичните поправки по-долу текстът вече не е дословно равен на нищо и проверката
@@ -196,6 +203,8 @@ def run_pipeline(
         log.info("[6б] Поправено автоматично: %s", fix)
     for unenforceable in formatted.unenforceable:
         log.warning("[6б] Правило от корпуса, което кодът не може да наложи: %s", unenforceable)
+    for note in formatted.notes:
+        log.info("[6б] бележка: %s", note)
     open_notes.extend(formatted.notes)
 
     # [7] Критик върху предложението — само констатира, не спира. Целта е човекът да види
@@ -212,8 +221,11 @@ def run_pipeline(
             filename=FINAL_CRITIQUE_FILENAME,
             force=force,
         )
-        open_notes.extend(critic.review_notes(final_critique))
-        log.info("[7] Финална проверка: %d открити въпроса", len(critic.review_notes(final_critique)))
+        final_notes = critic.review_notes(final_critique)
+        open_notes.extend(final_notes)
+        log.info("[7] %d открити въпроса в предложението", len(final_notes))
+        for note in final_notes:
+            log.info("[7] открит въпрос: %s", note)
     except AgentError as exc:
         open_notes.append(f"Финалната проверка не успя ({exc.human_message}) — прегледайте текста ръчно.")
         log.error("[7] Финалната проверка се счупи: %s", exc.human_message)
