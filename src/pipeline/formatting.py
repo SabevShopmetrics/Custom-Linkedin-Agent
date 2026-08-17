@@ -142,6 +142,98 @@ def _replace_unknown_urls(text: str, rules: FormatRules, brief_text: str, fixes:
     return text
 
 
+def _add_missing_thematic_emoji(text: str, rules: FormatRules, fixes: list[str]) -> str:
+    """
+    Ако постът е под emoji_min след цялата верига (Писател/Критик/Консолидатор), добавя
+    тематично емоджи на редове, които вече са структурни — благодарност, затварящ линк —
+    вместо само да го отбелязва като бележка за човек.
+
+    Съзнателно НЕ форсира точния минимум на всяка цена: emoji вкарано в наративен абзац
+    само за да се вдигне бройката би било точно декорацията, срещу която предупреждава
+    новото проучване в knowledge/voice/tone.md (2026-08-17) — "ако премахването му не
+    променя структурата, махни го" важи и в обратна посока: не добавяй, ако няма
+    структура, към която да се закачи. Ако безопасните места (благодарност, линк) се
+    изчерпят преди минимума, остатъкът остава като бележка по-долу в enforce(), не се
+    форсира с декоративна вложка.
+    """
+    if not rules.enforces_emoji or rules.emoji_min is None:
+        return text
+
+    current = len(extract_emoji(text))
+    if current >= rules.emoji_min:
+        return text
+
+    lines = text.split("\n")
+    added: list[str] = []
+    nonempty_indices = [i for i, line in enumerate(lines) if line.strip()]
+    last_nonempty = nonempty_indices[-1] if nonempty_indices else None
+
+    # Място 1: благодарствен ред — почти сигурно структурен елемент по гласа на клъстера.
+    if current < rules.emoji_min and "🙏" in rules.allowed_emoji:
+        for i, line in enumerate(lines):
+            if line.strip().lower().startswith("благодар") and not extract_emoji(line):
+                lines[i] = f"🙏 {line}"
+                current += 1
+                added.append("🙏 на благодарствения ред")
+                break
+
+    # Място 2: последният непразен ред, ако прилича на затваряща препратка (линк или
+    # покана да се види повече) — 🔗 ако носи URL, иначе 📖.
+    if current < rules.emoji_min and last_nonempty is not None:
+        line = lines[last_nonempty]
+        stripped = line.strip()
+        looks_like_closing = "вижте повече" in stripped.lower() or "http" in stripped
+        if looks_like_closing and not extract_emoji(line):
+            emoji = "🔗" if "http" in stripped else "📖"
+            if emoji in rules.allowed_emoji:
+                lines[last_nonempty] = f"{emoji} {line}"
+                current += 1
+                added.append(f"{emoji} на затварящия ред")
+
+    if added:
+        fixes.append(
+            f"Добавени {len(added)} тематични емоджита на вече структурни редове "
+            f"({', '.join(added)}) — постът беше под минимума {rules.emoji_min}."
+        )
+    return "\n".join(lines)
+
+
+def _strip_placeholder_closing(text: str, fixes: list[str]) -> str:
+    """
+    Маха изречението, съдържащо [линк] (обикновено затварящата формула "Вижте повече ...
+    тук: [линк]"), вместо да го остави видимо в готовия текст.
+
+    Потребителска обратна връзка (2026-08-17): видим placeholder в готов пост изглежда
+    "неловко" и "неправилно" — все едно постът е забравен недовършен, дори написаният до
+    него текст да е нормален. Писателят вече е инструктиран да не пише такова изречение,
+    ако няма реален адрес (виж writer.py) — това тук е код-ниво подсигуряване за случаите,
+    в които модел все пак го напише, или в които `_replace_unknown_urls` замести измислен
+    URL point и остави placeholder-а сам.
+
+    Работи на ниво изречение, не ред — затварящата формула често дели ред с предходно
+    легитимно съдържание ("Благодарим на... Вижте повече тук: [линк]"), и цял ред би
+    изтрил и легитимната част.
+    """
+    if LINK_PLACEHOLDER not in text:
+        return text
+
+    removed = False
+    new_lines: list[str] = []
+    for line in text.split("\n"):
+        sentences = re.split(r"(?<=[.!?])\s+", line)
+        kept = [s for s in sentences if LINK_PLACEHOLDER not in s]
+        if len(kept) != len(sentences):
+            removed = True
+        new_lines.append(" ".join(kept).strip())
+
+    if removed:
+        fixes.append(
+            f"Премахнато изречение с {LINK_PLACEHOLDER} — видим placeholder изглежда като "
+            f"недовършен пост; по-добре без затваряща фраза, отколкото с нея без реален линк."
+        )
+    return "\n".join(new_lines)
+
+
 def _opening_has_a_fact(text: str) -> bool:
     """Корпусът иска отваряне с число, дата или място. Числото и месецът са проверими."""
     first_line = next((line for line in text.splitlines() if line.strip()), "")
@@ -162,6 +254,9 @@ def enforce(text: str, rules: FormatRules, *, brief_text: str = "") -> Formattin
         working = _strip_disallowed_emoji(working, rules, fixes)
         working = _trim_excess_emoji(working, rules, fixes)
     working = _replace_unknown_urls(working, rules, brief_text, fixes)
+    working = _strip_placeholder_closing(working, fixes)
+    if rules.enforces_emoji and rules.emoji_min is not None:
+        working = _add_missing_thematic_emoji(working, rules, fixes)
     working = _tidy(working)  # последно — маха следите от всички изтривания по-горе
 
     # --- нататък само констатации: поправката им е писане, не чистене

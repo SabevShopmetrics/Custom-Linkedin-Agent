@@ -43,6 +43,7 @@ def test_generate_with_brief_creates_folder_and_writes_briefing(tmp_path, monkey
             open_notes = []
             merged_from = ["post_i.md", "post_ii.md"]
             applied_fixes = []
+            resolution_summary = None
 
         return Result()
 
@@ -87,6 +88,7 @@ def test_generate_without_brief_uses_explicit_force_flag(tmp_path, monkeypatch):
             open_notes = []
             merged_from = ["post_i.md", "post_ii.md"]
             applied_fixes = []
+            resolution_summary = None
 
         return Result()
 

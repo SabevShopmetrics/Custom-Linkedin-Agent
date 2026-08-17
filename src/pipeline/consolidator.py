@@ -83,6 +83,7 @@ class PipelineResult:
     open_notes: list[str] = field(default_factory=list)
     merged_from: list[str] = field(default_factory=list)
     applied_fixes: list[str] = field(default_factory=list)
+    resolution_summary: str | None = None  # виж research-plan-13-critic-resolution-visibility.md
 
 
 def synthesize(
@@ -164,6 +165,7 @@ def finalize(
     warnings: list[str] | None = None,
     merged_from: list[str] | None = None,
     applied_fixes: list[str] | None = None,
+    resolution_summary: str | None = None,
 ) -> PipelineResult:
     """Копира избраните снимки и записва output/meta.json — пълната одитна следа."""
     output_dir = post_dir / "output"
@@ -192,6 +194,7 @@ def finalize(
         "warnings": warnings or [],
         "merged_from": merged_from or [],
         "applied_fixes": applied_fixes or [],
+        "resolution_summary": resolution_summary,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "plan": plan.model_dump(),
         "photos": {
@@ -212,4 +215,5 @@ def finalize(
         open_notes=open_notes or [],
         merged_from=merged_from or [],
         applied_fixes=applied_fixes or [],
+        resolution_summary=resolution_summary,
     )

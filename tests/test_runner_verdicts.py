@@ -321,7 +321,10 @@ def test_mechanical_rules_are_applied_to_the_proposal_before_it_is_written(tmp_p
     client = make_client(
         writer=["Пост I."],
         critic=[CLEAN_CRITIQUE, CLEAN_CRITIQUE],
-        consolidator=["12 души на среща. 📍 #ИКТ Вижте повече: https://измислен-домейн.org 🙏"],
+        consolidator=[
+            "12 души на среща. 🙏 Благодарим на всички за участието. "
+            "📍 #ИКТ Вижте повече: https://измислен-домейн.org"
+        ],
     )
 
     result = run_pipeline(post_dir, client, knowledge=knowledge)
@@ -330,9 +333,12 @@ def test_mechanical_rules_are_applied_to_the_proposal_before_it_is_written(tmp_p
     assert "#ИКТ" not in written
     assert "📍" not in written
     assert "измислен-домейн" not in written
-    assert "[линк]" in written
+    # Видим "[линк]" в готов пост изглежда като недовършен текст (потребителска обратна
+    # връзка 2026-08-17) — цялото затварящо изречение се маха, не само адресът.
+    assert "[линк]" not in written
+    assert "Вижте повече" not in written
     assert "🙏" in written
-    assert len(result.applied_fixes) == 3  # хаштаг, емоджи, адрес
+    assert len(result.applied_fixes) == 4  # хаштаг, емоджи, адрес, изречение с placeholder
     assert result.status == "ready_with_notes"
 
     final_check_prompt = client.prompts[Role.CRITIC][1]

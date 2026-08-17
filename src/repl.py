@@ -71,6 +71,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import date
@@ -79,6 +80,7 @@ from typing import Callable, Iterable
 
 from rich.console import Console
 from rich.panel import Panel
+from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 from rich.text import Text
 
 from src.brand.loader import BrandKnowledge, audit_knowledge, load_brand_knowledge
@@ -114,6 +116,7 @@ HELP_TEXT = """\
   /photos           показва прикаченото; /photos clear го изчиства
   /revise <текст>   пренаписва последния пост с допълнителна инструкция
   /again            пуска последния бриф наново (всички стъпки от нула)
+  /preview          отваря визуален изглед (текст + избрани снимки) в браузър
   /last             показва последния пост още веднъж
   /log [n]          последните n реда от run.log на последния пост (по подр. 30)
   /dir              папката на последния пост; /open я отваря
@@ -346,6 +349,12 @@ _SUPPRESSED_LOG_PREFIXES = (
 # текущата отворена секция — идва хронологично веднага след нея.
 _STEP_TAG_RE = re.compile(r"^(\[[^\]]+\](?:/\[[^\]]+\])?)\s*")
 
+# Редът на таговете, точно както ги пише runner.py (виж докстринга на модула там) — за
+# прогрес-бара в _run_with_spinner: позицията на тага в този списък е "стъпка N от 7".
+# "[6б]" не е отделно LLM извикване (механичните правила се налагат в кода), но си остава
+# видима отсечка от гледна точка на човек пред терминала, затова е в списъка.
+_STEP_ORDER = ["[1]", "[2]/[3]", "[4]", "[5]", "[6]", "[6б]", "[7]"]
+
 
 class ProgressHandler(logging.Handler):
     """
@@ -361,6 +370,11 @@ class ProgressHandler(logging.Handler):
         self._emit_line = emit_line
         self._ink = ink
         self._current_tag: str | None = None
+        # Задава се отвън, само докато траят на екран прогрес-бар (виж _run_with_spinner) —
+        # извиква се веднъж на всяка НОВА стъпка, с (таг, пълно съобщение). None извън
+        # генериране — handler-ът си стои закачен цяла сесия, барът съществува само за
+        # едно пускане.
+        self.on_step: Callable[[str, str], None] | None = None
 
     def emit(self, record: logging.LogRecord) -> None:
         message = record.getMessage()
@@ -372,6 +386,8 @@ class ProgressHandler(logging.Handler):
 
         if tag and tag != self._current_tag:
             self._current_tag = tag
+            if self.on_step:
+                self.on_step(tag, message)
             self._emit_line("")
             self._emit_line(self._ink.bold(f"▸ {message}"))
             return
@@ -437,6 +453,7 @@ class Repl:
         self.knowledge: BrandKnowledge | None = None
         self.state = SessionState()
         self._running = True
+        self._progress_handler: ProgressHandler | None = None
 
     # ------------------------------------------------------------------ цикъл
 
@@ -460,6 +477,7 @@ class Repl:
         # ProgressHandler препраща логовете на конвейера към конзолата в реално време,
         # докато е закачен — виж logging_utils.register_persistent_handler.
         handler = ProgressHandler(self.out, self.ink)
+        self._progress_handler = handler
         register_persistent_handler(handler)
         try:
             while self._running:
@@ -562,6 +580,7 @@ class Repl:
             "wizard": self.cmd_wizard,
             "w": self.cmd_wizard,
             "attach": self.cmd_attach,
+            "preview": self.cmd_preview,
             "photos": self.cmd_photos,
             "revise": self.cmd_revise,
             "again": self.cmd_again,
@@ -801,6 +820,74 @@ class Repl:
         self.out(self.ink.dim(f"  {post_dir}" + (f" · {len(copied)} снимка(и)" if copied else " · без снимки")))
         self._generate(post_dir, force=False)
 
+    def _run_with_spinner(self, fn: Callable[[], PipelineResult]) -> PipelineResult:
+        """
+        Пуска `fn` във фонова нишка, докато главната показва жив прогрес-бар "стъпка N/7" +
+        изтекло време — план 12, находка 3.2: 5-9 минути мълчалив терминал по време на бавна
+        стъпка (напр. Media Picker с 10 снимки) не се различава от увиснал процес.
+
+        Барът напредва в момента, в който `ProgressHandler` (виж класа по-горе) засече нов
+        таг стъпка в лога — закачено през `handler.on_step`, докато този метод тече, после
+        свалено. Между два тага барът стои неподвижен на текущата стъпка, само спинърът и
+        часовникът се движат — честно е: не знаем колко остава ВЪТРЕ в дадена стъпка, но
+        знаем кое от седемте е.
+
+        Rich поддържа принтиране през СЪЩИЯ console, докато `Progress` е активен — барът
+        коректно се спира, редът се отпечатва, барът се предрисува (документирано поведение
+        на rich.progress.Progress). Затова `self.out` временно се пренасочва към
+        `progress.console.print`, вместо вградения `print()`, който би счупил визуално
+        живата рамка на бара.
+        """
+        if not self.ink.enabled:
+            # NO_COLOR/не-tty/тестове — прогрес-бар без цвят е безсмислен шум, просто изчакай.
+            return fn()
+
+        box: dict[str, object] = {}
+
+        def worker() -> None:
+            try:
+                box["result"] = fn()
+            except BaseException as exc:  # включва AgentError и неочаквани — препраща ги нагоре
+                box["error"] = exc
+
+        thread = threading.Thread(target=worker, daemon=True)
+        thread.start()
+
+        progress = Progress(
+            SpinnerColumn(style="cyan3"),
+            TextColumn("[bold]{task.description}"),
+            BarColumn(bar_width=20, complete_style="cyan3", finished_style="green3"),
+            TextColumn("{task.completed}/{task.total}"),
+            TimeElapsedColumn(),
+            console=_panel_console(),
+            transient=True,  # барът изчезва при край — редовете, вече отпечатани, остават
+        )
+        task_id = progress.add_task("Стартиране...", total=len(_STEP_ORDER))
+
+        def on_step(tag: str, message: str) -> None:
+            if tag in _STEP_ORDER:
+                progress.update(task_id, completed=_STEP_ORDER.index(tag) + 1, description=message[:60])
+            else:
+                progress.update(task_id, description=message[:60])
+
+        original_out = self.out
+        handler = self._progress_handler
+        with progress:
+            self.out = lambda line: progress.console.print(line)
+            if handler:
+                handler.on_step = on_step
+            try:
+                while thread.is_alive():
+                    thread.join(timeout=0.2)
+            finally:
+                self.out = original_out
+                if handler:
+                    handler.on_step = None
+
+        if "error" in box:
+            raise box["error"]  # type: ignore[misc]
+        return box["result"]  # type: ignore[return-value]
+
     def _generate(self, post_dir: Path, *, force: bool) -> None:
         """Пуска конвейера върху `post_dir` и отпечатва резултата/грешката. Общ път за нов пост, /again, /revise."""
         assert self.config is not None
@@ -809,7 +896,9 @@ class Repl:
         started = time.monotonic()
 
         try:
-            result = self.pipeline_fn(post_dir, client, force=force, knowledge=self.knowledge)
+            result = self._run_with_spinner(
+                lambda: self.pipeline_fn(post_dir, client, force=force, knowledge=self.knowledge)
+            )
         except AgentError as exc:
             # Критикът вече не спира конвейера (виж runner.py), така че тук идват само
             # входни и инфраструктурни грешки. Ако въпреки това на диска има текст от
@@ -819,6 +908,8 @@ class Repl:
                 self._print_post(partial)
                 self.out(self.ink.warn("  ⚠ Това е текст от прекъснато пускане, не финалното предложение."))
             self.out(self.ink.err(f"  ✗ Спряно: {exc.human_message}"))
+            if exc.detail:
+                self.out(self.ink.dim(f"  Причина: {exc.detail}"))
             self.out(self.ink.dim(f"  Пълен лог: {post_dir / 'run.log'} · /log го показва тук"))
             return
 
@@ -838,6 +929,8 @@ class Repl:
         calls = len(client.call_log)
         self.out(f"  {status} {self.ink.dim(f'· от {merged} · {calls} извиквания · {elapsed:.0f}s')}")
         self.out(self.ink.dim(f"  {result.post_path}"))
+        if result.resolution_summary:
+            self.out(self.ink.dim(f"  {result.resolution_summary}"))
 
         for fix in result.applied_fixes:
             self.out(self.ink.ok(f"  ✎ {fix}"))
@@ -847,7 +940,27 @@ class Repl:
             self.out(self.ink.warn(f"  ⚠ {warning}"))
         if result.open_notes or result.warnings:
             self.out(self.ink.dim("  Бележките не спират поста — прегледай ги преди публикуване."))
-        self.out(self.ink.dim("  /revise <инструкция> дошлайфа този пост · нов ред = нов пост"))
+        self.out(self.ink.dim("  /revise <инструкция> дошлайфа този пост · /preview за визуален изглед · нов ред = нов пост"))
+
+    def cmd_preview(self, _argument: str = "") -> None:
+        """
+        Генерира и отваря output/preview.html (текст + избрани снимки, самостоятелен файл) —
+        виж src/pipeline/preview.py. Добавено по план 12 (research-plan-12-post-quality-and-ux.md,
+        3.4): преди беше отделна CLI команда, лесна за забравяне; сега е една дума в REPL-а,
+        предложена автоматично след всяко успешно пускане.
+        """
+        if self.state.post_dir is None:
+            self.out(self.ink.dim("  Още няма генериран пост в тази сесия."))
+            return
+        from src.pipeline.preview import render_preview
+
+        try:
+            preview_path = render_preview(self.state.post_dir)
+        except FileNotFoundError as exc:
+            self.out(self.ink.err(f"  ✗ {exc}"))
+            return
+        _open_in_file_manager(preview_path)
+        self.out(self.ink.dim(f"  Отворено: {preview_path}"))
 
     def _print_post(self, text: str) -> None:
         """

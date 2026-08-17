@@ -52,6 +52,25 @@ SECOND_POST_FILENAME = "post_ii.md"
 FINAL_CRITIQUE_FILENAME = "critique_final.md"
 
 
+def _resolution_summary(initial_count: int, final_count: int) -> str:
+    """
+    Едно изречение сравняващо находките на Критика на Post I срещу тези на финалния текст —
+    виж research-plan-13-critic-resolution-visibility.md, Част 2. Не съпоставя КОИ точно
+    находки съвпадат (Post II преформулира, не копира — точно съвпадение на текста е
+    ненадеждно), само броя, което е достатъчно за да различи "адресирани" от "непроменени".
+    """
+    if final_count == 0:
+        label = "напълно адресирани"
+    elif final_count < initial_count:
+        label = "частично адресирани"
+    else:
+        label = "непроменени/влошени"
+    return (
+        f"Критикът намери {initial_count} находки в Post I; {final_count} остават отворени "
+        f"след Post II + Консолидатор ({label})."
+    )
+
+
 def _is_unfilled_template(briefing_text: str, template_path: Path = EXAMPLE_BRIEFING_PATH) -> bool:
     """
     Точно сравнение срещу posts/_example/briefing.md — хваща най-честия случай (`new` без
@@ -96,36 +115,52 @@ def run_pipeline(
     warnings: list[str] = []
     open_notes: list[str] = []
 
-    # [1] Планер
-    log.info("[1] Планер...")
-    plan = planner.run(post_dir, client, knowledge.stable_context, briefing_text, force=force)
-    log.info("[1] тип: %s · формат: %s · тон: %s", plan.post_type, plan.format, plan.tone)
-    log.info("[1] чувствителен: %s", "да" if plan.is_sensitive else "не")
-    if plan.notes:
-        log.info("[1] бележка на Планера: %s", plan.notes)
+    # Стъпки 1-4 НЕ са подсигурени като 5/6/7 (виж докстринга на модула) — грешка тук спира
+    # целия run. Ако е AgentError (напр. ModelUnavailableError), детайлът (суровата причина
+    # — HTTP статус, изключение при декодиране на снимка и т.н.) иначе се губи безследно:
+    # cli.py показва само exc.human_message, а run.log дотук няма нито ред за самата грешка.
+    # Ето защо тук изрично се логва human_message + detail, преди изключението да продължи
+    # нагоре — намерено при стрес тест с развалена снимка (2026-08-17): конвейерът спираше с
+    # общото "моделът не отговори... проверете API ключа", без следа, че истинската причина
+    # беше нечетимо съдържание на снимка, не недостъпен модел.
+    try:
+        # [1] Планер
+        log.info("[1] Планер...")
+        plan = planner.run(post_dir, client, knowledge.stable_context, briefing_text, force=force)
+        log.info("[1] тип: %s · формат: %s · тон: %s", plan.post_type, plan.format, plan.tone)
+        log.info("[1] чувствителен: %s", "да" if plan.is_sensitive else "не")
+        if plan.notes:
+            log.info("[1] бележка на Планера: %s", plan.notes)
 
-    # [2] Писател и [3] Media Picker вървят паралелно — независими една от друга
-    log.info("[2]/[3] Писател + Media Picker (паралелно)...")
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        draft_future = executor.submit(
-            writer.write_first_draft, post_dir, client, knowledge, plan, briefing_text, force=force
+        # [2] Писател и [3] Media Picker вървят паралелно — независими една от друга
+        log.info("[2]/[3] Писател + Media Picker (паралелно)...")
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            draft_future = executor.submit(
+                writer.write_first_draft, post_dir, client, knowledge, plan, briefing_text, force=force
+            )
+            media_future = executor.submit(media_picker.run, post_dir, client, plan, briefing_text, force=force)
+            post_i_text = draft_future.result()
+            media_selection, no_photos = media_future.result()
+        if no_photos:
+            log.warning("Папката photos/ е празна — постът ще съдържа само текст.")
+        log.info(
+            "[2]/[3] Post I: %d думи · снимки: %d избрани", len(post_i_text.split()), len(media_selection.selected)
         )
-        media_future = executor.submit(media_picker.run, post_dir, client, plan, briefing_text, force=force)
-        post_i_text = draft_future.result()
-        media_selection, no_photos = media_future.result()
-    if no_photos:
-        log.warning("Папката photos/ е празна — постът ще съдържа само текст.")
-    log.info("[2]/[3] Post I: %d думи · снимки: %d избрани", len(post_i_text.split()), len(media_selection.selected))
-    for item in media_selection.selected:
-        log.info("[2]/[3] снимка: %s — %s", item.filename, item.reason)
+        for item in media_selection.selected:
+            log.info("[2]/[3] снимка: %s — %s", item.filename, item.reason)
 
-    # [4] Критик върху Post I — намира какво да запълни вторият пост
-    log.info("[4] Критик върху Post I...")
-    critique = critic.run(post_dir, client, knowledge, plan, briefing_text, post_i_text, force=force)
-    findings = critic.collect_findings(critique)
-    log.info("[4] присъда: %s · %d находки за запълване", critique.verdict.value, len(findings))
-    for finding in findings:
-        log.info("[4] находка: %s", finding)
+        # [4] Критик върху Post I — намира какво да запълни вторият пост
+        log.info("[4] Критик върху Post I...")
+        critique = critic.run(post_dir, client, knowledge, plan, briefing_text, post_i_text, force=force)
+        findings = critic.collect_findings(critique)
+        log.info("[4] присъда: %s · %d находки за запълване", critique.verdict.value, len(findings))
+        for finding in findings:
+            log.info("[4] находка: %s", finding)
+    except AgentError as exc:
+        log.error("Спряно: %s", exc.human_message)
+        if exc.detail:
+            log.error("Причина (техническа подробност): %s", exc.detail)
+        raise
 
     # [5] Писател → Post II. Пропуска се само когато няма нито една находка — тогава няма
     # какво да запълва и втори модел ход би бил похарчен без причина.
@@ -210,6 +245,7 @@ def run_pipeline(
     # [7] Критик върху предложението — само констатира, не спира. Целта е човекът да види
     # какво остава открито в текста, който реално ще публикува, а не в междинна чернова.
     log.info("[7] Критик върху предложението (информативно)...")
+    resolution_summary: str | None = None
     try:
         final_critique = critic.run(
             post_dir,
@@ -226,6 +262,14 @@ def run_pipeline(
         log.info("[7] %d открити въпроса в предложението", len(final_notes))
         for note in final_notes:
             log.info("[7] открит въпрос: %s", note)
+
+        # Критикът вижда текста два пъти (Post I тук горе, крайния текст точно сега), но
+        # дотук никой не сравняваше двете числа — виж
+        # docs/research-plans/research-plan-13-critic-resolution-visibility.md. Чисто
+        # аритметика върху вече изчислени стойности, без нов LLM разход.
+        if findings:
+            resolution_summary = _resolution_summary(len(findings), len(final_notes))
+            log.info("[7] %s", resolution_summary)
     except AgentError as exc:
         open_notes.append(f"Финалната проверка не успя ({exc.human_message}) — прегледайте текста ръчно.")
         log.error("[7] Финалната проверка се счупи: %s", exc.human_message)
@@ -254,4 +298,5 @@ def run_pipeline(
         warnings=warnings,
         merged_from=merged_from,
         applied_fixes=applied_fixes,
+        resolution_summary=resolution_summary,
     )

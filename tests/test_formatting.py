@@ -130,7 +130,12 @@ def test_excess_emoji_are_trimmed_from_the_end():
     assert any("надбройни" in fix for fix in result.fixes)
 
 
-def test_invented_url_is_replaced_with_placeholder():
+def test_invented_url_sentence_is_removed_not_left_as_visible_placeholder():
+    """
+    Потребителска обратна връзка (2026-08-17): видим "[линк]" в готов пост изглежда като
+    забравен недовършен текст. По-добре цялото затварящо изречение да липсва, отколкото да
+    остане placeholder, който никога не се превръща в истински линк.
+    """
     result = enforce(
         "На 5 август 2026 се събрахме. Вижте повече: https://ictcluster-varna.org",
         sample_rules(),
@@ -138,8 +143,11 @@ def test_invented_url_is_replaced_with_placeholder():
     )
 
     assert "ictcluster-varna.org" not in result.text
-    assert LINK_PLACEHOLDER in result.text
+    assert LINK_PLACEHOLDER not in result.text
+    assert "Вижте повече" not in result.text
+    assert "На 5 август 2026 се събрахме." in result.text
     assert any("измислени от модела" in fix for fix in result.fixes)
+    assert any(LINK_PLACEHOLDER in fix for fix in result.fixes)
 
 
 def test_known_and_briefed_urls_survive():
@@ -153,7 +161,50 @@ def test_known_and_briefed_urls_survive():
 
     assert "ictclustervarna.com/programa" in result.text  # познат хост от facts.yaml
     assert "forms.gle/abc123" in result.text  # подаден в брифа
-    assert result.fixes == []
+    # Текстът няма нито едно емоджи — под минимума на sample_rules() — затова enforce()
+    # добавя автоматично 🔗 на затварящия ред (виж _add_missing_thematic_emoji); проверката
+    # тук е само че URL-ите не са пипнати, не че НИЩО не се е сменило в текста.
+    assert "🔗" in result.text
+    assert not any("непознат" in fix or "измислен" in fix for fix in result.fixes)
+
+
+def test_missing_emoji_are_added_to_thank_you_and_closing_lines_not_forced_elsewhere():
+    """
+    Код-ниво fallback за минимума емоджита (2026-08-17): само на вече структурни редове
+    (благодарност, затварящ линк), никога вкарано по средата на наративен абзац — виж
+    докстринга на _add_missing_thematic_emoji за защо форсиране навсякъде би било точно
+    декорацията, срещу която предупреждава knowledge/voice/tone.md.
+    """
+    text = (
+        "12 екипа участваха в хакатона на 5 август.\n"
+        "Благодарим на организаторите и партньорите за подкрепата.\n"
+        "Вижте повече тук: https://ictclustervarna.com"
+    )
+    result = enforce(text, sample_rules(), brief_text="хакатон")
+
+    lines = result.text.split("\n")
+    assert lines[0].startswith("12 екипа")  # наративният ред остава непипнат
+    assert lines[1].startswith("🙏")
+    assert lines[2].startswith("🔗")
+    assert any("Добавени" in fix and "структурни редове" in fix for fix in result.fixes)
+
+
+def test_missing_emoji_left_as_note_when_no_safe_structural_line_exists():
+    """Няма ред за благодарност/линк, за да се "закачи" емоджи — остава бележка, не декорация."""
+    result = enforce(
+        "12 екипа участваха в хакатона на 5 август. Наградихме първите три места.",
+        sample_rules(),
+        brief_text="хакатон",
+    )
+
+    assert not any(extract_emoji_for_test(result.text))
+    assert any("под" in note and "корпуса" in note for note in result.notes)
+
+
+def extract_emoji_for_test(text: str) -> list[str]:
+    from src.brand.format_rules import extract_emoji
+
+    return extract_emoji(text)
 
 
 def test_word_count_outside_the_range_is_a_note_not_a_fix():

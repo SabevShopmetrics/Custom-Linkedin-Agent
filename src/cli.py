@@ -1,17 +1,21 @@
 """
-Входна точка: `python -m src.cli [команда] ...`
+Входна точка: `python -m src.cli [команда] ...` — или направо `linkedin-agent` в PowerShell
+(script entry point от pyproject.toml, `pip install -e .` веднъж го регистрира на PATH).
 
-БЕЗ команда се отваря интерактивна сесия (виж src/repl.py) — човек пише бриф на
-промпта, агентът отпечатва готовия пост, /revise го дошлайфа. Това е нормалният
-начин за работа; командите по-долу остават за скриптове и еднократни проверки.
+БЕЗ команда (или `linkedin-agent` без аргументи) се отваря full-screen TUI-то (виж
+src/tui.py) — потребителска инструкция 2026-08-17. Старият readline REPL (src/repl.py,
+подразбиращ се до тогава) остава достъпен изрично през `chat`.
 
 Команди:
-  chat                             — същото като без команда: интерактивна сесия
+  chat                             — стар readline REPL (ред по ред, /команди)
+  tui                              — full-screen интерфейс (Textual) — същото и БЕЗ команда
   generate <post_dir> [--force] [--brief "текст"]   — минава през седемте стъпки на конвейера
                                                         (--brief пише директно briefing.md,
                                                         създава папката, ако не съществува —
                                                         без нужда от ръчно отваряне на файл)
   new <име>                        — създава posts/<име> от шаблона posts/_example
+  preview <post_dir>               — output/preview.html (текст + избрани снимки), за визуален
+                                     преглед в браузър на вече завършен пост
   check                            — пробва връзката с Open WebUI за всеки конфигуриран модел
   check-knowledge                  — показва кои knowledge/ файлове липсват/са празни
   bench [--only ПРЕФИКС] [--save ФАЙЛ] [--compare ФАЙЛ]
@@ -74,12 +78,20 @@ def cmd_generate(args: argparse.Namespace) -> int:
     except AgentError as exc:
         # Единствените изключения тук са за вход/инфраструктура — виж докстринга на runner.py.
         print(f"\n✗ Спряно: {exc.human_message}")
+        if exc.detail:
+            # Суровата причина (HTTP статус, грешка при декодиране на снимка и т.н.) — без нея
+            # човекът вижда само общото съобщение и няма как да прецени дали проблемът е
+            # наистина недостъпен модел, или нещо друго (напр. развален входен файл).
+            print(f"  Причина: {exc.detail}")
         print(f"Пълен лог: {post_dir / 'run.log'}")
         return 1
 
     # Отвъд тази точка конвейерът винаги е успял — само печатаме резюме и открити въпроси.
     merged = ", ".join(result.merged_from) or "?"
     print(f"\n✓ Официалното предложение е в: {result.post_path} (от {merged})")
+
+    if result.resolution_summary:
+        print(f"\n{result.resolution_summary}")
 
     if result.applied_fixes:
         print(f"\n✎ {len(result.applied_fixes)} автоматична(и) поправка(и) по правилата от knowledge/voice/:")
@@ -224,6 +236,29 @@ def cmd_bench(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_preview(args: argparse.Namespace) -> int:
+    """Генерира output/preview.html (текст + избрани снимки, вградени в самостоятелен файл)."""
+    from src.pipeline.preview import render_preview
+
+    post_dir = Path(args.post_dir)
+    try:
+        preview_path = render_preview(post_dir)
+    except FileNotFoundError as exc:
+        print(f"Грешка: {exc}")
+        return 1
+
+    print(f"Прегледът е записан в: {preview_path}")
+    return 0
+
+
+def cmd_tui(_args: argparse.Namespace) -> int:
+    # Импортът е вътре във функцията по същата причина като cmd_chat — textual/rich не се
+    # плащат при `generate`/`check` в скрипт или cron.
+    from src.tui import main as tui_main
+
+    return tui_main()
+
+
 def cmd_chat(_args: argparse.Namespace) -> int:
     # Импортът е вътре във функцията, за да не се плаща цената му при `generate`/`check`
     # в скрипт или cron — repl.py тегли конфигурация, knowledge и терминални неща.
@@ -241,6 +276,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     chat_parser = subparsers.add_parser("chat", help="интерактивна сесия в терминала (по подразбиране)")
     chat_parser.set_defaults(func=cmd_chat)
+
+    tui_parser = subparsers.add_parser("tui", help="full-screen интерфейс (Textual)")
+    tui_parser.set_defaults(func=cmd_tui)
 
     generate_parser = subparsers.add_parser("generate", help="генерира пост от бриф + снимки")
     generate_parser.add_argument("post_dir", help="папка на поста, напр. posts/2026-07-praktiki")
@@ -267,6 +305,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     check_knowledge_parser.set_defaults(func=cmd_check_knowledge)
 
+    preview_parser = subparsers.add_parser(
+        "preview", help="генерира output/preview.html (текст + избрани снимки) за вече завършен пост"
+    )
+    preview_parser.add_argument("post_dir", help="папка на вече завършен пост, напр. posts/2026-07-praktiki")
+    preview_parser.set_defaults(func=cmd_preview)
+
     bench_parser = subparsers.add_parser(
         "bench", help="мери качеството на вече направените пускания (без извикване към модел)"
     )
@@ -291,7 +335,10 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     if getattr(args, "func", None) is None:
-        return cmd_chat(args)
+        # Без подкоманда — директно full-screen TUI (потребителска инструкция 2026-08-17,
+        # за да работи `linkedin-agent` в PowerShell без аргументи). Старият readline REPL
+        # остава достъпен изрично през `chat`.
+        return cmd_tui(args)
     return args.func(args)
 
 
