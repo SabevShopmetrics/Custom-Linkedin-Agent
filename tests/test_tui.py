@@ -70,6 +70,21 @@ def test_app_mounts_and_shows_ready_message(tmp_path):
     run(scenario())
 
 
+def test_ctrl_c_exits_the_app(tmp_path):
+    """Потребителска инструкция 2026-08-17: Ctrl+C трябва да излиза, не само Ctrl+Q."""
+
+    async def scenario():
+        app = make_app(tmp_path, FakePipeline())
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            assert app.is_running
+            await pilot.press("ctrl+c")
+            await pilot.pause()
+            assert not app.is_running
+
+    run(scenario())
+
+
 def test_submitting_a_brief_runs_the_pipeline_and_shows_the_post(tmp_path):
     async def scenario():
         pipeline = FakePipeline()
@@ -85,8 +100,9 @@ def test_submitting_a_brief_runs_the_pipeline_and_shows_the_post(tmp_path):
 
             assert len(pipeline.calls) == 1
             output = app.query_one("#output")
-            assert "Готов пост от TUI теста." in str(output.content)
             assert "visible" in output.classes
+            output_text = app.query_one("#output-text")
+            assert "Готов пост от TUI теста." in str(output_text.content)
 
     run(scenario())
 

@@ -1,7 +1,8 @@
 """
 Оркестрира конвейера и управлява възобновяемостта.
 
-Верига (от 2026-08-11, потребителска инструкция — виж docs/technical/process-3.md):
+Верига v3 — подразбиране, от 2026-08-11, потребителска инструкция — виж
+docs/technical/process-3.md):
 
   [1] Планер
   [2] Писател → post_i.md        ┐ паралелно, независими
@@ -30,21 +31,39 @@
 Стъпки 5, 6 и 7 са допълнително подсигурени — ако някоя от тях се счупи, конвейерът
 записва каквото има и отбелязва това като открит въпрос, вместо да остави човека без текст.
 
+Верига v5 — условна, зад `PIPELINE_CHAIN=v5` в .env (подразбиране остава v3). Надгражда
+docs/technical/process-4.md (никога построена в код) по
+docs/research-plans/research-plan-15-pipeline-speed-quality-rearchitecture.md:
+
+  [1]   Планер                                              (непроменено)
+  [1.5] Факт-регистър → facts_pool.json                      код, не LLM
+  [2]/[3] Писател × N кандидата + Media Picker (паралелно)   независими кандидати
+  [4]   Филтър за проследимост → facts_check.json            код, не LLM
+  [5]   Съдия (pairwise) → judgement.json                    избира, НЕ пише
+  [6]   Механичните правила (formatting.py)                  (непроменено)
+  [7]   Финален критик — АСИНХРОННО, не блокира резултата
+
+`_run_pipeline_v3` е точно старата функция, непипната отвъд извличането в отделна функция
+и приемането на `log` като параметър (изборът на верига е конфигурация в `run_pipeline`,
+не преправяне на всяка стъпка — process-4.md, Част 0). `_run_pipeline_v5` е изцяло нов код.
+
 Всеки run пише хронологичен лог в posts/<име>/run.log (виж src/logging_utils.py).
 """
 
 from __future__ import annotations
 
+import threading
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from pathlib import Path
 
 from src.brand.loader import BrandKnowledge, load_brand_knowledge
 from src.errors import AgentError, BriefingMissingError, BriefingNotFilledError
 from src.llm.client import LLMClient
 from src.logging_utils import setup_run_logger
-from src.pipeline import consolidator, critic, formatting, media_picker, planner, writer
+from src.pipeline import consolidator, critic, facts_pool, formatting, judge, media_picker, planner, verifier, writer
 from src.pipeline.consolidator import PipelineResult
-from src.pipeline.util import read_text_or_none, write_text
+from src.pipeline.util import read_json, read_text_or_none, write_json, write_text
 
 EXAMPLE_BRIEFING_PATH = Path("posts/_example/briefing.md")
 
@@ -92,13 +111,11 @@ def run_pipeline(
     knowledge: BrandKnowledge | None = None,
 ) -> PipelineResult:
     """
-    Оркестрира всичките седем стъпки за една папка на пост (виж схемата в докстринга на
-    модула). Винаги връща PipelineResult с готово предложение — единствените изключения са
-    за вход (липсващ/нередактиран briefing.md) и инфраструктура (недостъпен модел),
-    хвърлени преди първото LLM извикване.
+    Валидира входа (общо за двете вериги), после разклонява на v3 (подразбиране) или v5
+    според `client.config.pipeline_chain` — изборът е конфигурация, не код (process-4.md,
+    Част 0). Тестови дубли без `.config` (виж tests/) падат обратно на v3, непроменено.
     """
     log = setup_run_logger(post_dir)
-    log.info("=== Ново пускане на конвейера за '%s' (force=%s) ===", post_dir, force)
 
     briefing_path = post_dir / "briefing.md"
     briefing_text = read_text_or_none(briefing_path)
@@ -112,6 +129,30 @@ def run_pipeline(
     if knowledge is None:
         knowledge = load_brand_knowledge()
 
+    config = getattr(client, "config", None)
+    chain = (getattr(config, "pipeline_chain", None) or "v3").strip().lower()
+    if chain not in ("v3", "v5"):
+        chain = "v3"  # непозната стойност в .env → безопасно подразбиране, не изключение
+
+    log.info("=== Ново пускане на конвейера за '%s' (force=%s, chain=%s) ===", post_dir, force, chain)
+
+    if chain == "v5":
+        return _run_pipeline_v5(post_dir, client, force=force, knowledge=knowledge, briefing_text=briefing_text, log=log)
+    return _run_pipeline_v3(post_dir, client, force=force, knowledge=knowledge, briefing_text=briefing_text, log=log)
+
+
+# ============================================================================ v3 (подразбиране)
+
+
+def _run_pipeline_v3(
+    post_dir: Path,
+    client: LLMClient,
+    *,
+    force: bool,
+    knowledge: BrandKnowledge,
+    briefing_text: str,
+    log,
+) -> PipelineResult:
     warnings: list[str] = []
     open_notes: list[str] = []
 
@@ -153,6 +194,23 @@ def run_pipeline(
         log.info("[4] Критик върху Post I...")
         critique = critic.run(post_dir, client, knowledge, plan, briefing_text, post_i_text, force=force)
         findings = critic.collect_findings(critique)
+
+        # Дължината под минимума на корпуса (knowledge/voice/tone.md, изведена от 12
+        # реални поста на самата страница) досега стигаше до човек само като бележка на
+        # formatting.enforce() СЛЕД Консолидатора — твърде късно, за да я поправи Post II.
+        # Потребителска инструкция 2026-08-17: минимумът трябва реално да се приложи, не
+        # само да се отбележи. Код-ниво проверка тук (детерминирана, не LLM преценка),
+        # инжектирана директно в findings — същия модел като GDPR проверките на критика.
+        words_min = knowledge.format_rules.words_min
+        post_i_words = len(post_i_text.split())
+        if words_min is not None and post_i_words < words_min:
+            findings.append(
+                f"Дължина: постът е {post_i_words} думи, под минимума {words_min} от корпуса "
+                f"(knowledge/voice/tone.md) — добави още конкретни факти (число, детайл, "
+                f"резултат), не общи изречения, за да стигнеш поне {words_min} думи."
+            )
+            log.info("[4] находка (код): под минимума %d думи (Post I: %d)", words_min, post_i_words)
+
         log.info("[4] присъда: %s · %d находки за запълване", critique.verdict.value, len(findings))
         for finding in findings:
             log.info("[4] находка: %s", finding)
@@ -300,3 +358,231 @@ def run_pipeline(
         applied_fixes=applied_fixes,
         resolution_summary=resolution_summary,
     )
+
+
+# ============================================================================ v5 (PIPELINE_CHAIN=v5)
+
+
+def _run_pipeline_v5(
+    post_dir: Path,
+    client: LLMClient,
+    *,
+    force: bool,
+    knowledge: BrandKnowledge,
+    briefing_text: str,
+    log,
+) -> PipelineResult:
+    """
+    Виж докстринга на модула за схемата. Разлика от v3, накратко: няма Post II/Консолидатор
+    цикъл, който пренаписва — има N независими кандидата, код-ниво филтър за проследимост,
+    и Съдия, който избира. Стъпка [7] тук е информативна, както в v3, но тече асинхронно.
+    """
+    warnings: list[str] = []
+    open_notes: list[str] = []
+    config = client.config  # само v5 стигна дотук, значи client.config съществува (виж run_pipeline)
+    n = max(1, config.writer_candidates)
+
+    try:
+        # [1] Планер — идентично на v3.
+        log.info("[1] Планер...")
+        plan = planner.run(post_dir, client, knowledge.stable_context, briefing_text, force=force)
+        log.info("[1] тип: %s · формат: %s · тон: %s", plan.post_type, plan.format, plan.tone)
+        log.info("[1] чувствителен: %s", "да" if plan.is_sensitive else "не")
+        if plan.notes:
+            log.info("[1] бележка на Планера: %s", plan.notes)
+
+        # [1.5] Факт-регистър — код, не LLM (виж src/pipeline/facts_pool.py).
+        log.info("[1.5] Факт-регистър...")
+        pool = facts_pool.build(post_dir, briefing_text, knowledge, force=force)
+        log.info(
+            "[1.5] %d твърдения от брифа · %d член(ове) с потвърдено съгласие",
+            len(pool.briefing_claims),
+            len(pool.mentionable_members),
+        )
+
+        # [2]/[3] Писател × N кандидата + Media Picker — паралелно.
+        log.info("[2]/[3] Писател × %d кандидата + Media Picker (паралелно)...", n)
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            candidates_future = executor.submit(
+                writer.write_candidates, post_dir, client, knowledge, plan, briefing_text, pool, n=n, force=force
+            )
+            media_future = executor.submit(media_picker.run, post_dir, client, plan, briefing_text, force=force)
+            candidates = candidates_future.result()
+            media_selection, no_photos = media_future.result()
+        if no_photos:
+            log.warning("Папката photos/ е празна — постът ще съдържа само текст.")
+        for filename, text in candidates:
+            log.info("[2]/[3] %s: %d думи", filename, len(text.split()))
+        for item in media_selection.selected:
+            log.info("[2]/[3] снимка: %s — %s", item.filename, item.reason)
+
+        # [4] Филтър за проследимост — код, не LLM (виж src/pipeline/verifier.py).
+        log.info("[4] Филтър за проследимост (код, без LLM извикване)...")
+        verifications = verifier.check_all(post_dir, candidates, briefing_text, pool, knowledge, force=force)
+        for v in verifications:
+            blocked_note = " · БЛОКИРАН (rules/forbidden.md)" if v.blocked else ""
+            log.info("[4] %s: %d непроследими твърдения%s", v.filename, v.unverified_count, blocked_note)
+
+        # [5] Съдия — сравнява по двойки, избира, НЕ пише (виж src/pipeline/judge.py).
+        log.info("[5] Съдия (сравнение по двойки)...")
+        judgement = judge.select(post_dir, client, knowledge, plan, candidates, verifications, force=force)
+        log.info("[5] избран: %s · %s", judgement.chosen_filename, judgement.reasoning_summary or "(без обобщение)")
+        if judgement.fallback_used:
+            open_notes.append(judgement.reasoning_summary)
+            log.warning("[5] %s", judgement.reasoning_summary)
+
+        chosen_verification = next(v for v in verifications if v.filename == judgement.chosen_filename)
+        for claim in chosen_verification.claims:
+            if not claim.verified:
+                open_notes.append(
+                    f"Недоказано твърдение — или го проследи до брифа/facts.yaml/members.yaml, "
+                    f"или го премахни: \"{claim.claim}\""
+                )
+        for violation in chosen_verification.rule_violations:
+            label = "GDPR" if violation.rule == "gdpr" else "rules/forbidden.md"
+            open_notes.append(f"[{label}] {violation.detail}")
+    except AgentError as exc:
+        log.error("Спряно: %s", exc.human_message)
+        if exc.detail:
+            log.error("Причина (техническа подробност): %s", exc.detail)
+        raise
+
+    official_text = judgement.chosen_text.strip()
+    merged_from = [judgement.chosen_filename]
+    write_text(post_dir / "output" / "post.md", official_text + "\n")
+
+    # [6] Механичните правила от корпуса — идентично на v3's [6б].
+    formatted = formatting.enforce(official_text, knowledge.format_rules, brief_text=briefing_text)
+    applied_fixes = formatted.fixes
+    if formatted.text != official_text:
+        official_text = formatted.text
+        write_text(post_dir / "output" / "post.md", official_text + "\n")
+    for fix in applied_fixes:
+        log.info("[6] Поправено автоматично: %s", fix)
+    for unenforceable in formatted.unenforceable:
+        log.warning("[6] Правило от корпуса, което кодът не може да наложи: %s", unenforceable)
+    for note in formatted.notes:
+        log.info("[6] бележка: %s", note)
+    open_notes.extend(formatted.notes)
+
+    if any(item.possible_minor for item in media_selection.selected):
+        warning_text = (
+            "Избрана снимка е маркирана от Media Picker като вероятно съдържаща непълнолетни лица — "
+            "прегледайте ръчно преди публикуване."
+        )
+        warnings.append(warning_text)
+        log.warning(warning_text)
+
+    status = "ready_with_notes" if (open_notes or warnings) else "ready"
+    log.info("Финален статус: %s (%d открити въпроса, %d предупреждения)", status, len(open_notes), len(warnings))
+    for note in open_notes:
+        log.warning("Открит въпрос: %s", note)
+
+    # [8] Бележка за EU AI Act, чл. 50 — чисто добавъчна метаданна (план 15, Част 2.9).
+    # НЕ твърди категорично дали маркировка е нужна — това зависи от бъдеща политика за
+    # автономно публикуване без преглед, извън обхвата на runner.py. Подготовка, не присъда.
+    ai_act_meta = {
+        "ai_act": {
+            "note": (
+                "Изключението за 'съществен човешки преглед' по чл. 50, ал. 4 вероятно важи, "
+                "докато всеки пост минава през човек преди публикуване (виж "
+                "research-plan-15-pipeline-speed-quality-rearchitecture.md, Част 2.9). "
+                "Полето е подготовка за деня, в който автономно публикуване без преглед "
+                "стане реалност — тогава машинно-четима маркировка вероятно става задължителна."
+            ),
+        }
+    }
+
+    result = consolidator.finalize(
+        post_dir,
+        client,
+        plan,
+        media_selection,
+        no_photos=no_photos,
+        status=status,
+        open_notes=open_notes,
+        warnings=warnings,
+        merged_from=merged_from,
+        applied_fixes=applied_fixes,
+        resolution_summary=None,
+        extra_meta=ai_act_meta,
+    )
+
+    # [7] Финален критик — АСИНХРОННО (план 15, Част 4/1.1: тази стъпка сама изяжда ~70s в
+    # v3, без да променя изхода — чисто информативна и там). Виж _start_async_final_check
+    # защо не пише през споделения logger.
+    _start_async_final_check(post_dir, client, knowledge, plan, briefing_text, official_text)
+
+    return result
+
+
+def _start_async_final_check(post_dir, client, knowledge, plan, briefing_text, official_text) -> None:
+    """
+    Стъпка [7] на v5 — тече във фонов daemon thread, за да не блокира вече показания на
+    човека резултат.
+
+    НЕ използва logging.getLogger(LOGGER_NAME) (src/logging_utils.py): setup_run_logger()
+    чисти handler-ите на ВСЕКИ извикване, а ако междувременно потребителят пусне НОВ пост
+    (втори run_pipeline в същия процес — реален случай в TUI/REPL), споделеният logger вече
+    сочи към ДРУГ run.log файл. Находките на този фонов thread биха се записали в грешната
+    папка. Затова пише директно във файла на СВОЯ post_dir, обвързан по стойност още преди
+    thread-ът да тръгне — никога през глобално споделено състояние.
+
+    `daemon=True`: ако процесът приключи (CLI `generate`, скрипт) преди фоновата проверка
+    да свърши, тя просто не се довършва — по-добре това, отколкото процес, който виси
+    заради стъпка, чийто резултат вече е показан.
+    """
+
+    def _worker() -> None:
+        log_path = post_dir / "run.log"
+        try:
+            _append_run_log(log_path, "[7] Финален критик (async, информативно)...")
+            final_critique = critic.run(
+                post_dir,
+                client,
+                knowledge,
+                plan,
+                briefing_text,
+                official_text,
+                filename=FINAL_CRITIQUE_FILENAME,
+                force=False,
+            )
+            final_notes = critic.review_notes(final_critique)
+            _append_run_log(log_path, f"[7] {len(final_notes)} открити въпроса в предложението (async)")
+            for note in final_notes:
+                _append_run_log(log_path, f"[7] открит въпрос: {note}")
+            _merge_async_notes_into_meta(post_dir, final_notes)
+        except AgentError as exc:
+            _append_run_log(log_path, f"[7] Финалната проверка (async) се счупи: {exc.human_message}")
+
+    thread = threading.Thread(target=_worker, daemon=True, name=f"final-check-{post_dir.name}")
+    thread.start()
+
+
+def _append_run_log(log_path: Path, message: str) -> None:
+    """Пряк запис във файл, без logging модула — виж докстринга на _start_async_final_check."""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with log_path.open("a", encoding="utf-8") as handle:
+        handle.write(f"{timestamp} [INFO] {message}\n")
+
+
+def _merge_async_notes_into_meta(post_dir: Path, final_notes: list[str]) -> None:
+    """
+    Дописва находките от асинхронната проверка в output/meta.json СЛЕД като той вече е
+    записан от consolidator.finalize() по-горе — read-merge-write, за да не се загуби
+    останалата одитна следа. bench.py и всеки друг читател на meta.json вижда пълната
+    картина, щом фоновата проверка приключи. TUI/REPL, които вече са показали резултата на
+    екрана, НЕ се обновяват визуално — известно, документирано ограничение (план 15,
+    Недоказани твърдения), не пропуск.
+    """
+    meta_path = post_dir / "output" / "meta.json"
+    if not meta_path.exists() or not final_notes:
+        return
+    try:
+        meta = read_json(meta_path)
+    except (OSError, ValueError):
+        return
+    meta["open_notes"] = list(meta.get("open_notes", [])) + list(final_notes)
+    if meta.get("status") == "ready":
+        meta["status"] = "ready_with_notes"
+    write_json(meta_path, meta)

@@ -19,6 +19,9 @@ class Role(str, Enum):
     MEDIA = "media"
     CRITIC = "critic"
     CONSOLIDATOR = "consolidator"
+    # v5 (research-plan-15, надгражда process-4.md) — Съдия: сравнява кандидати по двойки,
+    # не пише текст. Без значение, докато pipeline_chain="v3" (виж src/pipeline/runner.py).
+    JUDGE = "judge"
 
 
 _ROLE_TO_CONFIG_FIELD: dict[Role, str] = {
@@ -27,13 +30,24 @@ _ROLE_TO_CONFIG_FIELD: dict[Role, str] = {
     Role.MEDIA: "model_media",
     Role.CRITIC: "model_critic",
     Role.CONSOLIDATOR: "model_consolidator",
+    Role.JUDGE: "model_judge",
 }
 
 
 def model_for_role(role: Role, config: Config) -> str:
-    """Връща конфигурирания модел за дадена роля."""
+    """
+    Връща конфигурирания модел за дадена роля.
+
+    Role.JUDGE е нарочно изключение: `model_judge` не е в _REQUIRED_VARS (config.py) —
+    празна стойност значи "MODEL_JUDGE не е зададен в .env", и в този случай Съдията
+    преизползва model_critic. И двете роли правят сравнителна преценка срещу корпуса, не
+    пишат текст — разумно подразбиране, докато клъстерът не зададе отделен модел изрично.
+    """
     field = _ROLE_TO_CONFIG_FIELD[role]
-    return getattr(config, field)
+    value = getattr(config, field)
+    if role is Role.JUDGE and not value:
+        return config.model_critic
+    return value
 
 
 def supports_vision(role: Role) -> bool:
@@ -51,6 +65,8 @@ _FALLBACK_PRIORITY: dict[Role, tuple[Role, ...]] = {
     Role.CRITIC: (Role.CONSOLIDATOR, Role.WRITER, Role.PLANNER, Role.MEDIA),
     Role.CONSOLIDATOR: (Role.WRITER, Role.CRITIC, Role.PLANNER, Role.MEDIA),
     Role.MEDIA: (Role.WRITER, Role.CONSOLIDATOR, Role.CRITIC, Role.PLANNER),
+    # Съдията прави сравнителна преценка, като Критика — най-близката резервна задача.
+    Role.JUDGE: (Role.CRITIC, Role.CONSOLIDATOR, Role.WRITER, Role.PLANNER, Role.MEDIA),
 }
 
 

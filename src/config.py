@@ -51,6 +51,21 @@ class Config:
     # лимит за размер на снимка, изпращана към vision модел, преди ImageTooLargeError
     max_image_bytes: int = 4 * 1024 * 1024
 
+    # --- v5 (research-plan-15-pipeline-speed-quality-rearchitecture.md, надгражда
+    # docs/technical/process-4.md) — изборът на верига е конфигурация, не код (process-4.md,
+    # Част 0): "v3" (подразбиране) не пипа нищо от сегашния конвейер; "v5" избира новата
+    # верига в runner.py._run_pipeline_v5. Всяка друга стойност пада обратно на "v3".
+    pipeline_chain: str = "v3"
+
+    # Брой паралелни кандидата в стъпка [2] на v5 (process-4.md, "WRITER_CANDIDATES,
+    # подразбиране 3"). Без значение при pipeline_chain="v3".
+    writer_candidates: int = 3
+
+    # Модел за ролята Съдия (v5, стъпка [5]). Празно → model_for_role презема model_critic
+    # (виж src/llm/roles.py) — нарочно НЕ е добавено в _REQUIRED_VARS, за да не се изисква
+    # редактиране на .env само за да продължи да работи v3, докато v5 е изключен.
+    model_judge: str = ""
+
 
 _REQUIRED_VARS = (
     "OPENWEBUI_BASE_URL",
@@ -135,4 +150,7 @@ def load_config(env_path: Path | None = None) -> Config:
         temperature=_optional_float_env("TEMPERATURE"),
         seed=_optional_int_env("SEED"),
         max_tokens=_optional_int_env("MAX_TOKENS"),
+        pipeline_chain=(os.environ.get("PIPELINE_CHAIN", "v3").strip().lower() or "v3"),
+        writer_candidates=_int_env("WRITER_CANDIDATES", 3),
+        model_judge=os.environ.get("MODEL_JUDGE", "").strip(),
     )

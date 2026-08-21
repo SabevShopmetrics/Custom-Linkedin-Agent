@@ -24,6 +24,7 @@ import shutil
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from src.llm.client import LLMClient
 from src.llm.roles import Role
@@ -166,8 +167,16 @@ def finalize(
     merged_from: list[str] | None = None,
     applied_fixes: list[str] | None = None,
     resolution_summary: str | None = None,
+    extra_meta: dict[str, Any] | None = None,
 ) -> PipelineResult:
-    """Копира избраните снимки и записва output/meta.json — пълната одитна следа."""
+    """
+    Копира избраните снимки и записва output/meta.json — пълната одитна следа.
+
+    `extra_meta` е чисто добавъчен merge отгоре — v5 (runner.py) го ползва за полето
+    "ai_act" (план 15, Част 2.9/[8]); v3 не го подава изобщо, тоест поведението му е
+    непроменено. Полетата в `extra_meta`, ако съвпадат по име с вече изчислените отгоре,
+    печелят — извикващият код носи отговорност да не се пресича с фиксираните ключове.
+    """
     output_dir = post_dir / "output"
     post_path = output_dir / "post.md"
     meta_path = output_dir / "meta.json"
@@ -204,6 +213,8 @@ def finalize(
         },
         "calls": [entry.to_dict() for entry in client.call_log],
     }
+    if extra_meta:
+        meta.update(extra_meta)
     write_json(meta_path, meta)
 
     return PipelineResult(

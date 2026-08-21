@@ -90,6 +90,17 @@ class LLMClient:
         self._clock = clock
         self.call_log: list[CallLogEntry] = []
 
+    @property
+    def config(self) -> Config:
+        """
+        Публичен, само за четене достъп до конфигурацията — v5 (runner.py) чете
+        `client.config.pipeline_chain`/`writer_candidates`, за да реши коя верига да пусне,
+        без да дублира Config в отделен параметър на run_pipeline(). Тестови дубли
+        (FakeSequencedClient и др.) нямат това свойство — runner.py пада обратно на "v3"
+        през getattr(client, "config", None), затова добавянето тук не чупи нищо съществуващо.
+        """
+        return self._config
+
     # ------------------------------------------------------------------ публично API
 
     def complete(
@@ -202,6 +213,7 @@ class LLMClient:
             ("media", self._config.model_media),
             ("critic", self._config.model_critic),
             ("consolidator", self._config.model_consolidator),
+            ("judge", model_for_role(Role.JUDGE, self._config)),
             ("fallback", self._config.model_fallback),
         ]
         # Всеки модел се пробва отделно, БЕЗ retry — искаме бърз диагностичен изглед кой е

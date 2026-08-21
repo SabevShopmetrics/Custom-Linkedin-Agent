@@ -36,7 +36,9 @@ from src.brand.loader import audit_knowledge
 from src.config import ConfigError, load_config
 from src.errors import AgentError
 from src.llm.client import LLMClient
+from src.pipeline.preview import render_preview
 from src.pipeline.runner import run_pipeline
+from src.pipeline.util import file_uri
 from src.terminal import force_utf8_io
 
 POSTS_DIR = Path("posts")
@@ -89,6 +91,16 @@ def cmd_generate(args: argparse.Namespace) -> int:
     # Отвъд тази точка конвейерът винаги е успял — само печатаме резюме и открити въпроси.
     merged = ", ".join(result.merged_from) or "?"
     print(f"\n✓ Официалното предложение е в: {result.post_path} (от {merged})")
+    print(f"  файл:    {file_uri(result.post_path)}")
+
+    # Автоматичен преглед след всяко успешно пускане (потребителска заявка 2026-08-18) —
+    # преди изискваше отделно `preview` извикване. Best-effort: липсваща/развалена снимка тук
+    # не бива да съсипва вече успешния резултат от пълния конвейер.
+    try:
+        preview_path = render_preview(post_dir)
+        print(f"  преглед: {file_uri(preview_path)}")
+    except (FileNotFoundError, OSError) as exc:
+        print(f"  ⚠ Прегледът не се генерира: {exc}")
 
     if result.resolution_summary:
         print(f"\n{result.resolution_summary}")

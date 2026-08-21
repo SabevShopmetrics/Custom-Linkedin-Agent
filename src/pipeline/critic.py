@@ -132,6 +132,15 @@ _JSON_BLOCK_RE = re.compile(r"```json\s*(\{.*?\})\s*```", re.DOTALL)
 _NAME_PATTERN = re.compile(r"\b([А-ЯЁ][а-яё]+(?:-[А-ЯЁ][а-яё]+)?)[ \t]+([А-ЯЁ][а-яё]+(?:-[А-ЯЁ][а-яё]+)?)\b")
 
 _PAREN_RE = re.compile(r"\(([^)]+)\)")
+# Немалко записи ползват кавички вместо скоби за псевдонима, напр.
+# ПГКМКС "Академик Благовест Сендов" — поддържа както права, така и българска отваряща.
+_QUOTE_RE = re.compile(r'[„"]([^„"“]+)["“]')
+# Водеща абревиатура от поне 4 главни кирилски букви (ПГКМКС, ГПЧЕ, ВВМУ...) — реален
+# пропуск, открит на 2026-08-18: пост съкращава "ПГКМКС "Академик Благовест Сендов""
+# до "ПГКМКС – Варна", което не съдържа нито пълното име, нито псевдонима в кавички.
+# Под 4 букви НЕ се добавя нарочно (СУ, ОУ, ПГ, МГ...) — множество различни членове в
+# members.yaml споделят такива кратки съкращения и биха дали грешно съвпадение.
+_LEADING_ACRONYM_RE = re.compile(r"^([А-ЯЁ]{4,})\b")
 
 
 def _member_name_variants(name: str) -> list[str]:
@@ -139,17 +148,33 @@ def _member_name_variants(name: str) -> list[str]:
     Записите в members.yaml често са "Пълно официално име (Популярно/английско име)"
     (напр. "Зариба ЕООД (Zariba)") — пост естествено споменава само късата форма
     ("Zariba"), която НИКОГА не е точна подниза на пълния низ. Проверка само срещу
-    целия `name` пропуска почти всеки реален случай. Затова проверяваме и частите.
+    целия `name` пропуска почти всеки реален случай. Затова проверяваме и частите: псевдоним
+    в скоби, псевдоним в кавички и водеща абревиатура (виж коментарите над regex-ите по-горе).
     """
     variants = [name.strip()]
-    match = _PAREN_RE.search(name)
-    if match:
-        alias = match.group(1).strip()
+
+    paren_match = _PAREN_RE.search(name)
+    if paren_match:
+        alias = paren_match.group(1).strip()
         if alias:
             variants.append(alias)
-        before = name[: match.start()].strip()
+        before = name[: paren_match.start()].strip()
         if before:
             variants.append(before)
+
+    quote_match = _QUOTE_RE.search(name)
+    if quote_match:
+        alias = quote_match.group(1).strip()
+        if alias:
+            variants.append(alias)
+        before = name[: quote_match.start()].strip()
+        if before:
+            variants.append(before)
+
+    acronym_match = _LEADING_ACRONYM_RE.match(name)
+    if acronym_match:
+        variants.append(acronym_match.group(1))
+
     return [v for v in variants if len(v) >= 3]  # твърде кратки низове дават фалшиви положителни
 
 

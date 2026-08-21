@@ -133,6 +133,40 @@ class CritiqueSchema(BaseModel):
     summary: str = Field(default="", description="едно изречение обобщение на преценката")
 
 
+class PairwiseReasoning(BaseModel):
+    """Обосновката на Съдията (v5) по четирите части на поста — process-4.md, стъпка 5."""
+
+    opening: str = ""
+    body: str = ""
+    highlights: str = ""
+    closing: str = ""
+
+
+class PairwiseVerdictSchema(BaseModel):
+    """
+    Изход на Съдията (v5, src/pipeline/judge.py) за ЕДНО сравнение между два кандидата.
+
+    Само избор — Съдията няма поле за преработен текст в тази схема нарочно (process-4.md:
+    "Съдията НЯМА право да върне текст"). research-plan-15, Част 2.4: сравнение по двойки,
+    не скаларна оценка на всеки кандидат поотделно.
+    """
+
+    winner: str = Field(description="'A' или 'B' — кой от двата кандидата е по-добър")
+    reasoning: PairwiseReasoning = Field(default_factory=PairwiseReasoning)
+    summary: str = Field(default="", description="едно изречение обобщение на избора")
+
+    @field_validator("winner", mode="before")
+    @classmethod
+    def _normalize_winner(cls, value: object) -> object:
+        """Нормализира до 'A'/'B'; всичко друго гърми тук — по-добре поправящ retry, отколкото
+        мълчаливо невалиден победител, който judge.py да тълкува грешно."""
+        if isinstance(value, str):
+            stripped = value.strip().upper()
+            if stripped in ("A", "B"):
+                return stripped
+        raise ValueError(f"winner трябва да е 'A' или 'B', получено: {value!r}")
+
+
 def parse_structured(raw_text: str, schema: type[BaseModel]) -> BaseModel:
     """
     Опитва да извлече и валидира JSON от суров текстов отговор на модел.

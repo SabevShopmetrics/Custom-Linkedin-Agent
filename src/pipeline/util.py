@@ -44,3 +44,12 @@ def list_photos(photos_dir: Path) -> list[Path]:
 def should_skip(output_path: Path, *, force: bool) -> bool:
     """Спазва правилото за възобновяемост: пропусни стъпка, чийто изходен файл вече съществува."""
     return output_path.exists() and not force
+
+
+def file_uri(path: Path) -> str:
+    """
+    `file://` линк към локален път — кликаем в повечето терминали (Windows Terminal, iTerm,
+    VS Code) за отваряне без copy-paste. `Path.as_uri()` изисква абсолютен път, затова
+    `resolve()` първо.
+    """
+    return path.resolve().as_uri()

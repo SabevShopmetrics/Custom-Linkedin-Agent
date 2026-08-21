@@ -385,3 +385,32 @@ def test_possible_minor_photo_is_a_warning_not_a_stopping_condition(tmp_path):
     assert result.status == "ready_with_notes"
     assert any("непълнолетни" in w for w in result.warnings)
     assert result.post_path.exists()
+
+
+# --------------------------------------------------------------- дължина под минимума (2026-08-17)
+
+
+def test_short_post_i_gets_a_length_finding_and_triggers_second_post(tmp_path):
+    """
+    Потребителска инструкция 2026-08-17: минимумът от корпуса трябва реално да стигне до
+    Писателя, не само да излезе като бележка накрая (formatting.enforce, СЛЕД
+    Консолидатора — твърде късно за поправка). Проверката е код-ниво в runner.py, не LLM
+    преценка на Критика.
+    """
+    from src.brand.format_rules import FormatRules
+
+    post_dir = tmp_path / "post"
+    _write_briefing(post_dir)
+    client = make_client(
+        writer=["Кратко.", "Много по-дълъг втори пост с конкретни факти и числа за събитието."],
+        critic=[CLEAN_CRITIQUE, CLEAN_CRITIQUE],  # Критикът сам не намира нищо — само дължината е проблем
+        consolidator=["Много по-дълъг втори пост с конкретни факти и числа за събитието."],
+    )
+    knowledge = make_brand_knowledge(format_rules=FormatRules(words_min=20))
+
+    result = run_pipeline(post_dir, client, knowledge=knowledge)
+
+    # Post II беше извикан (втори елемент в опашката на writer се консумира) — доказва, че
+    # findings не е бил празен, въпреки че Критикът сам по себе си върна CLEAN_CRITIQUE.
+    assert len(client.prompts[Role.WRITER]) == 2
+    assert "по-дълъг" in result.post_path.read_text(encoding="utf-8")

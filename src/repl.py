@@ -89,8 +89,9 @@ from src.errors import AgentError
 from src.llm.client import LLMClient
 from src.logging_utils import register_persistent_handler, unregister_persistent_handler
 from src.pipeline.consolidator import PipelineResult
+from src.pipeline.preview import render_preview
 from src.pipeline.runner import run_pipeline
-from src.pipeline.util import PHOTO_EXTENSIONS, list_photos, read_text_or_none
+from src.pipeline.util import PHOTO_EXTENSIONS, file_uri, list_photos, read_text_or_none
 from src.terminal import force_utf8_io, sanitize_input
 
 POSTS_DIR = Path("posts")
@@ -928,7 +929,17 @@ class Repl:
         status = self.ink.ok("✓ предложение") if result.status == "ready" else self.ink.warn("⚠ предложение с бележки")
         calls = len(client.call_log)
         self.out(f"  {status} {self.ink.dim(f'· от {merged} · {calls} извиквания · {elapsed:.0f}s')}")
-        self.out(self.ink.dim(f"  {result.post_path}"))
+        self.out(self.ink.dim(f"  файл:    {file_uri(result.post_path)}"))
+
+        # Автоматичен преглед след всяко успешно пускане (потребителска заявка 2026-08-18) —
+        # преди изискваше ръчно /preview. Best-effort: развален преглед не бива да съсипва
+        # вече готовото предложение по-горе.
+        try:
+            preview_path = render_preview(post_dir)
+            self.out(self.ink.dim(f"  преглед: {file_uri(preview_path)}"))
+        except (FileNotFoundError, OSError) as exc:
+            self.out(self.ink.dim(f"  ⚠ Прегледът не се генерира: {exc}"))
+
         if result.resolution_summary:
             self.out(self.ink.dim(f"  {result.resolution_summary}"))
 
@@ -952,8 +963,6 @@ class Repl:
         if self.state.post_dir is None:
             self.out(self.ink.dim("  Още няма генериран пост в тази сесия."))
             return
-        from src.pipeline.preview import render_preview
-
         try:
             preview_path = render_preview(self.state.post_dir)
         except FileNotFoundError as exc:

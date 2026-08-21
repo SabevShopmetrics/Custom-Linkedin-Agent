@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import yaml
@@ -27,6 +28,7 @@ from src.brand.loader import BrandKnowledge
 from src.llm.client import LLMClient
 from src.llm.roles import Role
 from src.llm.schema import PlanSchema
+from src.pipeline.facts_pool import FactsPool, render_for_writer
 from src.pipeline.util import read_text_or_none, should_skip, write_text
 
 DRAFT_SYSTEM_PROMPT_TEMPLATE = """\
@@ -73,6 +75,11 @@ docs/research-plans/research-plan-10-linkedin-post-craft.md). Където то�
   Изречение, което може да стои в пост на всяка друга организация („фокусирахме се върху
   ключови етапи", „с цел максимална полза"), е празно и не бива да го има. По-добре с
   едно изречение по-малко, отколкото с едно празно повече.
+- Дължината НЕ е фиксирана цел — прецени я сам по количеството реално съдържание в брифа
+  и ИЗТОЧНИЦИТЕ. Ако брифът дава достатъчно имена за благодарност, числа, ход на събитието
+  или резултати — пиши дълго, свободно до горната граница от ТОН/ФОРМАТИ по-горе. Ако брифът
+  е тънък, спри се на долната граница, но НЕ добавяй общи изречения само за да „запълниш"
+  диапазона — плътността от точката по-горе има предимство пред бройката думи.
 """
 
 SOURCES_BLOCK_TEMPLATE = """\
@@ -231,4 +238,102 @@ def write_second_post(
     text = client.complete(Role.WRITER, prompt, system=system)
     assert isinstance(text, str)
     write_text(second_path, text.strip() + "\n")
+    return text
+
+
+# --------------------------------------------------------------------- v5 (кандидати, план 15)
+
+# Един ред "ъгъл" на кандидат вместо temperature (process-4.md, стъпка 2: "температура
+# и/или един ред ъгъл в промпта"). Съзнателно избрано пред temperature: llm/client.py вече
+# подава temperature само ако е зададена в .env (план 11, находка 2.7) и не е тествано как
+# self-hosted доставчикът реагира на вариране на нея за диверсификация — вижте план 15,
+# Недоказани твърдения. Ъгълът е детерминиран, безплатен и не зависи от поведение на
+# доставчик, което не е измерено.
+CANDIDATE_ANGLES = [
+    "пиши от гледна точка на екипа на клъстера, който организира повода",
+    "пиши от гледна точка на човек, който обмисля да участва — какво получава той конкретно",
+    "пиши от гледна точка на фирма член/партньор — защо поводът е релевантен за бизнеса",
+]
+
+
+def write_candidates(
+    post_dir: Path,
+    client: LLMClient,
+    knowledge: BrandKnowledge,
+    plan: PlanSchema,
+    briefing_text: str,
+    facts_pool: FactsPool,
+    *,
+    n: int = 3,
+    force: bool = False,
+) -> list[tuple[str, str]]:
+    """
+    Стъпка [2] на v5 — N кандидата, паралелно, независими (process-4.md: "вторият не
+    наследява свиването на първия" — точно обратното на v3's Post I → Post II верига).
+
+    Връща [(filename, text), ...] в стабилен ред (post_1.md, post_2.md, ...), независимо
+    от реда, в който паралелните извиквания реално приключват.
+    """
+    candidates_dir = post_dir / "candidates"
+    slots = [(f"post_{i + 1}.md", CANDIDATE_ANGLES[i % len(CANDIDATE_ANGLES)]) for i in range(n)]
+
+    results: dict[str, str] = {}
+    to_generate: list[tuple[str, str]] = []
+    for filename, angle in slots:
+        path = candidates_dir / filename
+        if should_skip(path, force=force):
+            # Възобновяемост: вече има този кандидат от предишно пускане.
+            results[filename] = read_text_or_none(path) or ""
+        else:
+            to_generate.append((filename, angle))
+
+    if to_generate:
+        with ThreadPoolExecutor(max_workers=len(to_generate)) as executor:
+            futures = {
+                executor.submit(
+                    _write_one_candidate,
+                    candidates_dir / filename,
+                    client,
+                    knowledge,
+                    plan,
+                    briefing_text,
+                    facts_pool,
+                    angle,
+                ): filename
+                for filename, angle in to_generate
+            }
+            for future, filename in futures.items():
+                results[filename] = future.result()
+
+    return [(filename, results[filename]) for filename, _ in slots]
+
+
+def _write_one_candidate(
+    path: Path,
+    client: LLMClient,
+    knowledge: BrandKnowledge,
+    plan: PlanSchema,
+    briefing_text: str,
+    facts_pool: FactsPool,
+    angle: str,
+) -> str:
+    """
+    Един кандидат. Преизползва DRAFT_SYSTEM_PROMPT_TEMPLATE (същата LinkedIn-занаятчийска
+    част като v3's Post I) — разликата е `sources_block`: явният факт-регистър вместо
+    сурови YAML файлове (виж facts_pool.render_for_writer), плюс един ред за ъгъла.
+    """
+    system = (
+        DRAFT_SYSTEM_PROMPT_TEMPLATE.format(
+            brand_context=knowledge.stable_context or "(няма зареден brand контекст)",
+            sources_block=render_for_writer(facts_pool),
+            post_type=plan.post_type,
+            format=plan.format,
+            tone=plan.tone,
+            notes=plan.notes or "(няма)",
+        )
+        + f"\n\nГледна точка за тази версия (не променя факти, само фокус/ред на изреченията): {angle}\n"
+    )
+    text = client.complete(Role.WRITER, briefing_text, system=system)
+    assert isinstance(text, str)
+    write_text(path, text.strip() + "\n")
     return text
