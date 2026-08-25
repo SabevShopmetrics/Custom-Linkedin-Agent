@@ -66,6 +66,12 @@ docs/research-plans/research-plan-10-linkedin-post-craft.md). Където то�
   Измислен домейн е най-скъпата грешка тук: изглежда достоверно и се публикува.
 - Без въдици за ангажимент („Съгласни ли сте? Коментирайте по-долу", „Пишете 👇") — от 2026
   LinkedIn изрично понижава такива постове.
+- НИКОГА не обяснявай в самия пост защо нещо липсва („не мога да публикувам имената поради
+  GDPR", „по правни/поверителност причини не споменаваме..."). Читателят не бива да вижда
+  вътрешната кухня на писането. Ако не можеш да назовеш някого/нещо — просто пиши общо
+  („фирми членове", „партньорска гимназия") и мълчи за причината; ако причината заслужава
+  внимание на човек, тя е бележка ЗАД кулисите (конвейерът я показва отделно), не изречение
+  в текста на поста.
 - Преди да върнеш текста, преброй емоджитата: трябва да са 3-6 (виж ТОН/ФОРМАТИ), всяко на
   структурна позиция (bullet, благодарност, препратка) — не по средата на изречение и не като
   декорация в отварящото изречение. Ако си под 3, добави тематично емоджи на legitimate
@@ -181,8 +187,13 @@ def write_first_draft(
     briefing_text: str,
     *,
     force: bool = False,
+    mode_instruction: str = "",
 ) -> str:
-    """Пише Post I (стъпка 2) — първата пълноценна чернова на поста по плана и брифа."""
+    """Пише Post I (стъпка 2) — първата пълноценна чернова на поста по плана и брифа.
+
+    `mode_instruction` идва от pipeline/modes.py (режим "Кадър"/"Фокус"/"Панорама", избран
+    изрично от човека) — "" при "Фокус" означава без промяна спрямо диапазона от корпуса.
+    """
     draft_path = post_dir / "post_i.md"
     if should_skip(draft_path, force=force):
         # Възобновяемост: вече има чернова от предишно пускане.
@@ -197,6 +208,8 @@ def write_first_draft(
         tone=plan.tone,
         notes=plan.notes or "(няма)",
     )
+    if mode_instruction:
+        system += f"\n\n{mode_instruction}\n"
     text = client.complete(Role.WRITER, briefing_text, system=system)
     assert isinstance(text, str)  # без schema=, complete() винаги връща str тук
     write_text(draft_path, text.strip() + "\n")
@@ -214,8 +227,14 @@ def write_second_post(
     *,
     output_filename: str = "post_ii.md",
     force: bool = False,
+    mode_instruction: str = "",
 ) -> str:
-    """Втори пост по същия повод, който запълва находките на Критика върху първия."""
+    """Втори пост по същия повод, който запълва находките на Критика върху първия.
+
+    `mode_instruction` — виж докстринга на write_first_draft; Post II пази същия избран
+    режим за дължина като Post I, иначе Консолидаторът би обединявал два поста с несъвместими
+    цели за обем.
+    """
     second_path = post_dir / output_filename
     if should_skip(second_path, force=force):
         # Възобновяемост: вече има Post II от предишно пускане.
@@ -234,6 +253,8 @@ def write_second_post(
         brand_context=knowledge.stable_context or "(няма зареден brand контекст)",
         sources_block=render_sources_block(knowledge),
     )
+    if mode_instruction:
+        system += f"\n\n{mode_instruction}\n"
 
     text = client.complete(Role.WRITER, prompt, system=system)
     assert isinstance(text, str)
@@ -266,6 +287,7 @@ def write_candidates(
     *,
     n: int = 3,
     force: bool = False,
+    mode_instruction: str = "",
 ) -> list[tuple[str, str]]:
     """
     Стъпка [2] на v5 — N кандидата, паралелно, независими (process-4.md: "вторият не
@@ -299,6 +321,7 @@ def write_candidates(
                     briefing_text,
                     facts_pool,
                     angle,
+                    mode_instruction,
                 ): filename
                 for filename, angle in to_generate
             }
@@ -316,11 +339,13 @@ def _write_one_candidate(
     briefing_text: str,
     facts_pool: FactsPool,
     angle: str,
+    mode_instruction: str = "",
 ) -> str:
     """
     Един кандидат. Преизползва DRAFT_SYSTEM_PROMPT_TEMPLATE (същата LinkedIn-занаятчийска
     част като v3's Post I) — разликата е `sources_block`: явният факт-регистър вместо
-    сурови YAML файлове (виж facts_pool.render_for_writer), плюс един ред за ъгъла.
+    сурови YAML файлове (виж facts_pool.render_for_writer), плюс един ред за ъгъла и
+    евентуален режим за дължина (pipeline/modes.py).
     """
     system = (
         DRAFT_SYSTEM_PROMPT_TEMPLATE.format(
@@ -333,6 +358,8 @@ def _write_one_candidate(
         )
         + f"\n\nГледна точка за тази версия (не променя факти, само фокус/ред на изреченията): {angle}\n"
     )
+    if mode_instruction:
+        system += f"\n{mode_instruction}\n"
     text = client.complete(Role.WRITER, briefing_text, system=system)
     assert isinstance(text, str)
     write_text(path, text.strip() + "\n")

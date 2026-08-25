@@ -4,6 +4,14 @@
 не го заменя — активира се изрично с `python -m src.cli tui`. repl.py остава подразбиращият
 се начин на работа (`python -m src.cli` без аргумент); нищо в него не е пипнато.
 
+За кратко (2026-08-17 до 2026-08-25) това беше обърнато — TUI-то стана подразбиращо се.
+Върнато обратно на 2026-08-25 по потребителска инструкция: full-screen приложение задължително
+грабва alt-screen буфера на терминала, а докато той е грабнат, никой terminal emulator не дава
+собствен (native) scrollback върху него — фундаментално ограничение на терминалите, не бъг тук
+за поправяне. Claude Code CLI (и repl.py) НЕ ползват alt-screen въобще, затова там scrollback
+работи изцяло нормално. TUI-то остава напълно работещо и се пуска изрично с `tui`, за който
+предпочита "премиум" изгледа му пред native scrollback-а.
+
 Защо отделен модул, не преправяне на repl.py: Textual е различен модел на изпълнение
 (event loop, widgets, async workers), не читаема добавка върху readline цикъла. Двата пътя
 споделят логиката на конвейера (src/pipeline/runner.py) и малките помощници на repl.py
@@ -26,14 +34,16 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.color import Gradient
 from textual.containers import Vertical, VerticalScroll
+from textual.message import Message
 from textual.theme import Theme
-from textual.widgets import Footer, Header, Input, ProgressBar, RichLog, Static
+from textual.widgets import Footer, Header, ProgressBar, RichLog, Static, TextArea
 
 from src.brand.loader import BrandKnowledge, load_brand_knowledge
 from src.config import Config, ConfigError, load_config
 from src.errors import AgentError
 from src.llm.client import LLMClient
 from src.logging_utils import register_persistent_handler, unregister_persistent_handler
+from src.pipeline import modes
 from src.pipeline.preview import render_preview
 from src.pipeline.runner import run_pipeline
 from src.pipeline.util import file_uri, read_text_or_none
@@ -41,6 +51,7 @@ from src.repl import (
     _STEP_ORDER,
     _STEP_TAG_RE,
     copy_attachments,
+    copy_to_clipboard,
     extract_inline_attachments,
     slugify,
     unique_post_dir,
@@ -91,6 +102,40 @@ class _TuiLogHandler(logging.Handler):
         self._app.call_from_thread(self._app.handle_log_line, tag, message, is_warning)
 
 
+class BriefInput(TextArea):
+    """
+    Полето за брифа — многоредово, с пренасяне на текста (soft wrap), вместо еднолинейния
+    `Input`, който преди него скролираше хоризонтално и показваше само парче от по-дългия
+    бриф (потребителска обратна връзка 2026-08-25: "инпут полето да пренася текста, да не е
+    на един ред").
+
+    Enter изпраща брифа (както преди при `Input`); Ctrl+J вмъква нов ред в брифа самия —
+    Shift+Enter НЕ е избираем тук нарочно: терминалите нямат стандартен начин да различат
+    Shift+Enter от обикновено Enter (виж проверка на textual/keys.py — няма запис за
+    "shift+enter"), докато Ctrl+J е отделен, надежден байт (LF), разпознаваем от textual.
+    """
+
+    class Submitted(Message):
+        def __init__(self, brief_input: "BriefInput", value: str) -> None:
+            self.brief_input = brief_input
+            self.value = value
+            super().__init__()
+
+    async def _on_key(self, event: events.Key) -> None:
+        if event.key == "enter":
+            event.stop()
+            event.prevent_default()
+            self.post_message(self.Submitted(self, self.text))
+            return
+        if event.key == "ctrl+j":
+            event.stop()
+            event.prevent_default()
+            start, end = self.selection
+            self._replace_via_keyboard("\n", start, end)
+            return
+        await super()._on_key(event)
+
+
 class AgentTUI(App):
     """Едноекранно приложение: лог отгоре, готов текст под него, прогрес-бар, вход отдолу."""
 
@@ -106,6 +151,13 @@ class AgentTUI(App):
     }
     #log {
         height: 1fr;
+        /* min-height е задължителен: #output по-долу може да поиска до 55% от екрана, а
+           "1fr" без долна граница може да се свие практически до 0 в тесен terminal —
+           точно това счупи скрола в лога (потребителска обратна връзка 2026-08-25:
+           "не мога да скролвам в големия терминал" — нямаше го какво да скролираш,
+           панелът беше свит до нищо). 6 реда остават видими и скролируеми винаги.
+        */
+        min-height: 6;
         border: round $primary;
         border-title-color: $secondary;
         padding: 0 1;
@@ -114,7 +166,11 @@ class AgentTUI(App):
     }
     #output {
         height: auto;
-        max-height: 45%;
+        /* По-рано 82% — прекалено агресивно, задушаваше #log (виж коментара там). 55% пак
+           показва дълъг пост почти изцяло без скрол за нормален terminal, но оставя реално
+           място за лога отгоре. scrollbar-size-vertical остава като предпазна мрежа само за
+           наистина екстремен случай (много дълга "Панорама" на много нисък terminal). */
+        max-height: 55%;
         border: round $success;
         border-title-color: $success;
         padding: 1 2;
@@ -130,6 +186,21 @@ class AgentTUI(App):
         height: auto;
         width: 100%;
     }
+    #output-link {
+        /* ИЗВЪН скролиращия #output — статичен ред, който НЕ зависи от скрол позиция.
+           Потребителска обратна връзка 2026-08-25 (два пъти): "пак не виждам линк" — линкът
+           беше в #log, който скролира и може да е бил превъртян нагоре или свит. Тук е
+           закачен директно под текста на поста, винаги на екрана, докато #output е видим. */
+        height: auto;
+        margin: 0 1 1 1;
+        padding: 0 2;
+        display: none;
+        color: $success;
+        text-style: bold;
+    }
+    #output-link.visible {
+        display: block;
+    }
     #progress {
         margin: 1 1 0 1;
     }
@@ -141,6 +212,11 @@ class AgentTUI(App):
     #brief {
         margin: 1 1 1 1;
         border: round $accent;
+        /* Многоредово поле, не еднолинейно — виж BriefInput по-горе за защо. 5 реда е
+           достатъчно за бриф от 2-3 изречения без скрол; по-дълъг просто скролира ВЪТРЕ в
+           тази малка кутия (за разлика от output-а по-горе, тук няма смисъл да расте с
+           текста — брифът се пише, не се чете). */
+        height: 5;
     }
     """
 
@@ -210,6 +286,11 @@ class AgentTUI(App):
         self._generating = False
         self._gen_token = 0
 
+        # Режим за дължина на следващия пост (pipeline/modes.py) — сменя се с командата
+        # `/mode` в самото поле за брифа (виж on_brief_input_submitted), важи за цялата
+        # сесия докато не бъде сменен пак, огледално на src/repl.py::cmd_mode.
+        self.mode: str = modes.DEFAULT_MODE
+
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         with Vertical():
@@ -221,6 +302,7 @@ class AgentTUI(App):
             # и като е наполовина разгънат не се вижда всичко".
             with VerticalScroll(id="output"):
                 yield Static("", id="output-text")
+            yield Static("", id="output-link")
             yield ProgressBar(
                 id="progress",
                 total=len(_STEP_ORDER),
@@ -230,7 +312,14 @@ class AgentTUI(App):
                 gradient=Gradient((0.0, _ACCENT), (1.0, _ACCENT)),
             )
             yield Static("", id="status")
-            yield Input(placeholder="Опиши повода за поста (@път за снимка) и Enter…", id="brief")
+            yield BriefInput(
+                placeholder=(
+                    "Опиши повода за поста (@път за снимка, /mode за дължина) и Enter… "
+                    "(Ctrl+J за нов ред в брифа)"
+                ),
+                id="brief",
+                show_line_numbers=False,
+            )
         yield Footer()
 
     def on_mount(self) -> None:
@@ -245,8 +334,12 @@ class AgentTUI(App):
             log.write(f"[bold red]Грешка в конфигурацията: {exc}[/]")
             return
         self.knowledge = self.knowledge_loader()
-        log.write("[bold cyan]Готово. Напиши брифа долу и натисни Enter.[/]")
-        self.query_one("#brief", Input).focus()
+        mode_label = modes.get_mode(self.mode).label
+        log.write(
+            f"[bold cyan]Готово. Напиши брифа долу и натисни Enter. "
+            f"Дължина: {mode_label} (по подразбиране) — /mode за Кадър/Панорама.[/]"
+        )
+        self.query_one("#brief", BriefInput).focus()
 
     # ------------------------------------------------------------------ прогрес от лога
 
@@ -303,62 +396,78 @@ class AgentTUI(App):
         except Exception:
             pass
 
-    # ------------------------------------------------------------------ история (↑/↓)
+    # ------------------------------------------------------------------ история (Ctrl+↑/Ctrl+↓)
 
     def on_key(self, event: events.Key) -> None:
         """
-        ↑/↓ в полето за брифа прелистват историята — Input widget-ът на textual не бинди
-        тези клавиши сам (само left/right/home/end/... виж widgets/_input.py), затова
-        събитието стига необезпокоявано дотук през bubbling от фокусирания widget.
+        Ctrl+↑/Ctrl+↓ в полето за брифа прелистват историята. Обикновено ↑/↓ вече не могат
+        да свършат тази работа откакто брифът е многоредов (BriefInput/TextArea): те са
+        нужни за движение на курсора между редовете на самия бриф (TextArea ги бинди сама —
+        виж widgets/_text_area.py BINDINGS), затова историята мина на Ctrl+вариант, който
+        нищо друго не ползва тук.
         """
-        if event.key not in ("up", "down"):
+        if event.key not in ("ctrl+up", "ctrl+down"):
             return
-        input_widget = self.query_one("#brief", Input)
+        input_widget = self.query_one("#brief", BriefInput)
         if not input_widget.has_focus or input_widget.disabled or not self._history:
             return
 
-        if event.key == "up":
+        if event.key == "ctrl+up":
             if self._history_index == 0:
                 return
             if self._history_index == len(self._history):
-                self._history_draft = input_widget.value
+                self._history_draft = input_widget.text
             self._history_index -= 1
         else:
             if self._history_index >= len(self._history):
                 return
             self._history_index += 1
 
-        input_widget.value = (
+        input_widget.text = (
             self._history_draft
             if self._history_index == len(self._history)
             else self._history[self._history_index]
         )
-        input_widget.cursor_position = len(input_widget.value)
+        input_widget.move_cursor(input_widget.document.end)
         event.prevent_default()
         event.stop()
 
     # ------------------------------------------------------------------ генериране
 
-    def on_input_submitted(self, event: Input.Submitted) -> None:
+    def on_brief_input_submitted(self, event: BriefInput.Submitted) -> None:
         raw = event.value.strip()
         if not raw or self.config is None:
             return
 
         # Запис в историята преди всичко останало — независимо дали пускането ще успее,
-        # потребителят трябва да може да го извика обратно с ↑ (виж on_key).
+        # потребителят трябва да може да го извика обратно с Ctrl+↑ (виж on_key).
         if not self._history or self._history[-1] != raw:
             self._history.append(raw)
         self._history_index = len(self._history)
         self._history_draft = ""
+
+        # `/mode ...` е команда, не бриф — сменя дължината на СЛЕДВАЩИЯ пост (огледално на
+        # src/repl.py::cmd_mode), не тръгва конвейер. Разпознава се преди @-извличането,
+        # за да не се опитва то да чете снимки от текст като "/mode панорама".
+        if raw.startswith("/"):
+            name, _, argument = raw[1:].partition(" ")
+            if name.strip().lower() == "mode":
+                self._handle_mode_command(argument.strip())
+                event.brief_input.text = ""
+                return
+            self.query_one("#log", RichLog).write(
+                f"[bold red]Непозната команда '/{name}'. Единствената тук е /mode.[/]"
+            )
+            return
 
         brief, photos, unresolved = extract_inline_attachments(raw)
         if not brief:
             self.query_one("#log", RichLog).write("[bold red]Брифът е празен.[/]")
             return
 
-        input_widget = self.query_one("#brief", Input)
+        input_widget = self.query_one("#brief", BriefInput)
         input_widget.disabled = True
-        input_widget.value = ""
+        input_widget.text = ""
 
         post_dir = unique_post_dir(self.posts_dir, slugify(brief), today=date.today())
         post_dir.mkdir(parents=True, exist_ok=True)
@@ -368,9 +477,14 @@ class AgentTUI(App):
         log = self.query_one("#log", RichLog)
         output = self.query_one("#output", VerticalScroll)
         output.remove_class("visible")
+        self.query_one("#output-link", Static).remove_class("visible")
         bar = self.query_one("#progress", ProgressBar)
         bar.update(progress=0)
-        log.write(f"[bold]▸ Нов пост: {post_dir}[/]" + (f" · {len(copied)} снимка(и)" if copied else ""))
+        mode_obj = modes.get_mode(self.mode)
+        log.write(
+            f"[bold]▸ Нов пост: {post_dir}[/] · режим: {mode_obj.label}"
+            + (f" · {len(copied)} снимка(и)" if copied else "")
+        )
         for item in unresolved:
             log.write(f"[dim](@{item} не е съществуваща снимка — остава като текст в брифа)[/]")
 
@@ -378,10 +492,30 @@ class AgentTUI(App):
         self._generating = True
         self._gen_token += 1
         token = self._gen_token
+        mode_for_run = self.mode  # снимка на СЕГАШНИЯ избор — /mode по-късно не бива да го променя in-flight
         self._start_spinner()
-        self.run_worker(lambda: self._generate(post_dir, token), thread=True, exclusive=True, group="generate")
+        self.run_worker(
+            lambda: self._generate(post_dir, token, mode_for_run), thread=True, exclusive=True, group="generate"
+        )
 
-    def _generate(self, post_dir: Path, token: int) -> None:
+    def _handle_mode_command(self, argument: str) -> None:
+        """`/mode` в полето за брифа — виж докстринга на on_brief_input_submitted."""
+        log = self.query_one("#log", RichLog)
+        if not argument:
+            current = modes.get_mode(self.mode)
+            log.write(f"[bold]Текущ режим: {current.label}[/]")
+            log.write(f"[dim]Налични: {modes.mode_list_text()}[/]")
+            log.write("[dim]Смяна: /mode кадър · /mode фокус · /mode панорама[/]")
+            return
+        key = modes.resolve_mode(argument)
+        if key is None:
+            log.write(f"[bold red]Непознат режим '{argument}'. Налични: {modes.mode_list_text()}[/]")
+            return
+        self.mode = key
+        chosen = modes.get_mode(key)
+        log.write(f"[bold green]✓ Режим: {chosen.label}[/] — важи от следващия пост нататък.")
+
+    def _generate(self, post_dir: Path, token: int, mode: str) -> None:
         """
         Тече във фонова нишка (Textual worker, thread=True) — не блокира event loop-а.
         `token` е самоличността на ТОВА пускане (виж коментара в __init__ до `_gen_token`) —
@@ -396,16 +530,16 @@ class AgentTUI(App):
         handler = _TuiLogHandler(self)
         register_persistent_handler(handler)
         try:
-            result = self.pipeline_fn(post_dir, client, knowledge=self.knowledge)
+            result = self.pipeline_fn(post_dir, client, knowledge=self.knowledge, mode=mode)
         except AgentError as exc:
             self.call_from_thread(self._show_error, post_dir, exc, token)
         else:
-            self.call_from_thread(self._show_result, result, token)
+            self.call_from_thread(self._show_result, result, token, mode)
         finally:
             unregister_persistent_handler(handler)
             self.call_from_thread(self._reenable_input, token)
 
-    def _show_result(self, result, token: int) -> None:
+    def _show_result(self, result, token: int, mode: str) -> None:
         if token != self._gen_token:
             return  # прекъснато с Ctrl+C междувременно — резултатът дойде закъснял, игнорира се
         text = (read_text_or_none(result.post_path) or "").strip()
@@ -416,16 +550,6 @@ class AgentTUI(App):
         output.scroll_home(animate=False)  # нов резултат винаги се показва от началото
 
         log = self.query_one("#log", RichLog)
-        status = "[bold green]✓ ready[/]" if result.status == "ready" else "[bold yellow]⚠ ready_with_notes[/]"
-        log.write(f"{status} [dim]файл: {file_uri(result.post_path)}[/]")
-
-        # Автоматичен преглед след всяко успешно пускане (потребителска заявка 2026-08-18).
-        # Best-effort: развален преглед не бива да съсипва вече готовия резултат по-горе.
-        try:
-            preview_path = render_preview(result.output_dir.parent)
-            log.write(f"[dim]преглед: {file_uri(preview_path)}[/]")
-        except (FileNotFoundError, OSError) as exc:
-            log.write(f"[dim]⚠ Прегледът не се генерира: {exc}[/]")
 
         if result.resolution_summary:
             log.write(f"[dim]{result.resolution_summary}[/]")
@@ -435,6 +559,31 @@ class AgentTUI(App):
             log.write(f"[yellow]⚠ {note}[/]")
         for warning in result.warnings:
             log.write(f"[yellow]⚠ {warning}[/]")
+
+        status = "[bold green]✓ ready[/]" if result.status == "ready" else "[bold yellow]⚠ ready_with_notes[/]"
+        mode_label = modes.get_mode(mode).label
+        log.write(f"{status} [dim]{mode_label} · {len(text.split())} думи · файл: {file_uri(result.post_path)}[/]")
+
+        copied = bool(text) and copy_to_clipboard(text)
+        if copied:
+            log.write("[dim]📋 копирано в клипборда[/]")
+
+        # Линкът/копирането излизат ТУК, в отделен статичен ред извън #log — потребителска
+        # обратна връзка 2026-08-25 (два пъти): "пак не виждам линк". #log скролира и/или
+        # може да е свит (виж CSS коментара при #log за защо се свиваше); ред, написан само
+        # там, лесно остава невидим — извън екрана нагоре или под свит панел. #output-link е
+        # закачен директно под текста на поста и НЕ скролира — винаги на екрана, докато
+        # изходът е видим, независимо какво е състоянието на лога отгоре.
+        link_line = self.query_one("#output-link", Static)
+        try:
+            preview_path = render_preview(result.output_dir.parent)
+            copy_note = " · 📋 копирано в клипборда" if copied else ""
+            link_line.update(f"🔗 Отвори в браузър (реалистичен изглед): {file_uri(preview_path)}{copy_note}")
+            link_line.add_class("visible")
+        except (FileNotFoundError, OSError) as exc:
+            log.write(f"[dim]⚠ Прегледът не се генерира: {exc}[/]")
+            link_line.update(f"⚠ Прегледът не се генерира: {exc}")
+            link_line.add_class("visible")
 
     def _show_error(self, post_dir: Path, exc: AgentError, token: int) -> None:
         if token != self._gen_token:
@@ -456,7 +605,7 @@ class AgentTUI(App):
             return  # вече прекъснато от Ctrl+C — входът е освободен там, това е закъсняло echo
         self._generating = False
         self._stop_spinner()
-        input_widget = self.query_one("#brief", Input)
+        input_widget = self.query_one("#brief", BriefInput)
         input_widget.disabled = False
         input_widget.focus()
 

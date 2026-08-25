@@ -36,7 +36,7 @@ class FakePipeline:
         self.raises = raises
 
     def __call__(self, post_dir: Path, client, *, force: bool = False, knowledge=None, **kwargs) -> PipelineResult:
-        self.calls.append({"post_dir": post_dir, "force": force, "knowledge": knowledge})
+        self.calls.append({"post_dir": post_dir, "force": force, "knowledge": knowledge, "mode": kwargs.get("mode")})
         if self.raises is not None:
             raise self.raises
         output_dir = post_dir / "output"
@@ -281,6 +281,45 @@ def test_unknown_command_does_not_become_a_brief(tmp_path):
 
     assert pipeline.calls == []
     assert "Непозната команда" in "\n".join(output)
+
+def test_mode_defaults_to_fokus_and_is_passed_to_the_pipeline(tmp_path):
+    pipeline = FakePipeline()
+    repl, _ = make_repl(tmp_path, pipeline, ["Практики за студенти"])
+
+    repl.run()
+
+    assert pipeline.calls[0]["mode"] == "fokus"
+
+
+def test_mode_command_switches_mode_for_the_next_post(tmp_path):
+    pipeline = FakePipeline()
+    repl, output = make_repl(tmp_path, pipeline, ["/mode панорама", "Практики за студенти"])
+
+    repl.run()
+
+    assert any("Панорама" in line for line in output)
+    assert pipeline.calls[0]["mode"] == "panorama"
+
+
+def test_mode_command_without_argument_shows_current_choice(tmp_path):
+    pipeline = FakePipeline()
+    repl, output = make_repl(tmp_path, pipeline, ["/mode"])
+
+    repl.run()
+
+    assert any("Текущ режим" in line and "Фокус" in line for line in output)
+    assert pipeline.calls == []
+
+
+def test_mode_command_rejects_unknown_mode(tmp_path):
+    pipeline = FakePipeline()
+    repl, output = make_repl(tmp_path, pipeline, ["/mode нещо-си"])
+
+    repl.run()
+
+    assert any("Непознат режим" in line for line in output)
+    assert pipeline.calls == []
+
 
 def test_bare_keyword_opens_the_wizard_without_a_slash(tmp_path):
     """

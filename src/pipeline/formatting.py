@@ -35,6 +35,17 @@ LINK_PLACEHOLDER = "[линк]"
 
 _DIGIT_RE = re.compile(r"\d")
 
+# Хваща изречения, в които моделът "чупи четвъртата стена" — обяснява на читателя ЗАЩО нещо
+# липсва (GDPR, поверителност), вместо просто да пропусне детайла мълчаливо. Реален случай
+# (2026-08-25): постът съдържаше буквално "не мога да публикувам имената поради GDPR
+# съображения" — вярна причина, грешно място. Виж _strip_meta_disclaimers().
+_META_DISCLAIMER_RE = re.compile(
+    r"(?i)\bGDPR\b"
+    r"|поради\s+(съображения\s+за\s+)?поверителност"
+    r"|не\s+(мога|можем|бива)\s+да\s+(публикувам|публикуваме|спомена\w*|назова\w*|посоча\w*)"
+    r"\s+(имена\w*|снимк\w*|лиц\w*)"
+)
+
 
 @dataclass
 class FormattingResult:
@@ -234,6 +245,69 @@ def _strip_placeholder_closing(text: str, fixes: list[str]) -> str:
     return "\n".join(new_lines)
 
 
+def _strip_meta_disclaimers(text: str, notes: list[str]) -> str:
+    """
+    Маха изречения, в които моделът говори за собствения си процес на писане/цензуриране
+    (GDPR, "не мога да публикувам имената поради...") ВЪТРЕ в текста на поста. Причината е
+    вярна и важна — но мястото ѝ е бележка към човека (open_notes → ⚠ предупреждение в
+    CLI/REPL/TUI), не публикуван текст: читател на LinkedIn пост не бива да вижда вътрешната
+    кухня на инструмента, който го е написал. Работи на ниво изречение, не ред — same модел
+    като _strip_placeholder_closing() по-долу, за същата причина (изречението често дели ред
+    с легитимно съдържание).
+
+    Потребителска инструкция (2026-08-25): "това са глупости и не трябва да са в пост...
+    нека да излиза като warning — там е супер и е важно, но НИкога в пост."
+    """
+    if not _META_DISCLAIMER_RE.search(text):
+        return text
+
+    removed: list[str] = []
+    new_lines: list[str] = []
+    for line in text.split("\n"):
+        sentences = re.split(r"(?<=[.!?])\s+", line)
+        kept = []
+        for sentence in sentences:
+            if _META_DISCLAIMER_RE.search(sentence):
+                removed.append(sentence.strip())
+            else:
+                kept.append(sentence)
+        new_lines.append(" ".join(kept).strip())
+
+    if removed:
+        quoted = " · ".join(f'"{s}"' for s in removed)
+        notes.append(
+            f"Постът обясняваше в самия текст защо нещо липсва (GDPR/поверителност) — "
+            f"премахнато от текста, защото читателят не бива да вижда вътрешната кухня на "
+            f"писането: {quoted}. Прегледайте дали липсващото име/детайл наистина трябва да "
+            f"остане пропуснато."
+        )
+    return "\n".join(new_lines)
+
+
+_LEVA_RE = re.compile(r"\bлв\.?\b|\bлева\b", re.IGNORECASE)
+_LEVA_AMOUNT_RE = re.compile(r"[\d][\d\s.,]*\s*(?:лв\.?|лева)", re.IGNORECASE)
+
+
+def _flag_leva_currency(text: str, notes: list[str]) -> None:
+    """
+    Флагва спомената сума в лева — България е в еврозоната (потребителска инструкция
+    2026-08-25: "България е самоо в евро"), затова "30 лв." в НОВ пост почти сигурно
+    трябва да е в евро. Само бележка, НЕ пипа текста: ако е изрично писано в лева (напр.
+    исторически факт, като сумата от благотворителния бал, събрана преди приемането на
+    еврото — виж identity/facts.yaml, first_ball_raised), то си остава непроменено —
+    курсът лев→евро не е нещо, което кодът трябва да гадае вместо човек.
+    """
+    if not _LEVA_RE.search(text):
+        return
+    amounts = list(dict.fromkeys(match.strip() for match in _LEVA_AMOUNT_RE.findall(text)))
+    shown = ", ".join(f'"{amount}"' for amount in amounts) if amounts else "лв./лева"
+    notes.append(
+        f"Постът споменава сума в лева ({shown}) — България е в еврозоната. Ако не е "
+        f"исторически факт (сума отпреди приемането на еврото), проверете дали не трябва "
+        f"да е в евро; ако е нарочно в лева, оставете го непроменено."
+    )
+
+
 def _opening_has_a_fact(text: str) -> bool:
     """Корпусът иска отваряне с число, дата или място. Числото и месецът са проверими."""
     first_line = next((line for line in text.splitlines() if line.strip()), "")
@@ -255,6 +329,7 @@ def enforce(text: str, rules: FormatRules, *, brief_text: str = "") -> Formattin
         working = _trim_excess_emoji(working, rules, fixes)
     working = _replace_unknown_urls(working, rules, brief_text, fixes)
     working = _strip_placeholder_closing(working, fixes)
+    working = _strip_meta_disclaimers(working, notes)
     if rules.enforces_emoji and rules.emoji_min is not None:
         working = _add_missing_thematic_emoji(working, rules, fixes)
     working = _tidy(working)  # последно — маха следите от всички изтривания по-горе
@@ -279,5 +354,7 @@ def enforce(text: str, rules: FormatRules, *, brief_text: str = "") -> Formattin
             "Първият ред няма число, дата или месец. Корпусът иска отваряне с конкретен факт, "
             "а първите ~140 знака са единственото, което се вижда преди 'виж повече'."
         )
+
+    _flag_leva_currency(working, notes)
 
     return FormattingResult(text=working, fixes=fixes, notes=notes, unenforceable=list(rules.unparsed))

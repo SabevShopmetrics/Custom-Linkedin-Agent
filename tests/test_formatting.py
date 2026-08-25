@@ -150,6 +150,47 @@ def test_invented_url_sentence_is_removed_not_left_as_visible_placeholder():
     assert any(LINK_PLACEHOLDER in fix for fix in result.fixes)
 
 
+def test_gdpr_meta_commentary_is_removed_and_flagged_as_a_note():
+    """
+    Потребителска обратна връзка (2026-08-25): постът съдържаше буквално "не мога да
+    публикувам имената поради GDPR съображения" — вярна причина, грешно място. Читателят на
+    LinkedIn не бива да вижда вътрешната кухня на писането; причината си остава важна, но
+    като бележка към човека (open_notes → ⚠ предупреждение), никога в самия текст.
+    """
+    result = enforce(
+        "Днес отбелязахме 15 години от основаването.\n"
+        "Не мога да публикувам имената на стажантите поради GDPR съображения.\n"
+        "Благодарим на всички партньори за подкрепата.",
+        sample_rules(),
+    )
+
+    assert "GDPR" not in result.text
+    assert "Днес отбелязахме 15 години от основаването." in result.text
+    assert "Благодарим на всички партньори за подкрепата." in result.text
+    assert any("GDPR" in note for note in result.notes)
+
+
+def test_leva_amount_is_flagged_but_left_untouched():
+    """
+    Потребителска инструкция (2026-08-25): "България е самоо в евро" — сума в лева в НОВ
+    пост е почти сигурно грешка, но текстът не се пипа автоматично (курсът лев→евро не е
+    нещо, което кодът трябва да гадае) — само бележка, ако е изрично писано в лева.
+    """
+    result = enforce(
+        "12 души на 5 август. Входът е 30 лв. за външни участници.",
+        sample_rules(),
+    )
+
+    assert "30 лв." in result.text  # текстът НЕ се пипа
+    assert any("лева" in note and "30 лв." in note for note in result.notes)
+
+
+def test_no_leva_note_when_currency_not_mentioned():
+    result = enforce("12 души на 5 август. Входът е свободен.", sample_rules())
+
+    assert not any("лева" in note for note in result.notes)
+
+
 def test_known_and_briefed_urls_survive():
     rules = sample_rules()
     text = (

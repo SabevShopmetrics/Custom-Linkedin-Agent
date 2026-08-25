@@ -31,3 +31,13 @@ include = ["src*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "live: hits the REAL configured LLM backend from .env (no mocking) — excluded from the default run (see addopts); run explicitly with `pytest -m live`",
+]
+# Всичките ~250+ теста освен live-маркираните ползват fake/mock клиенти (виж test_llm_client.py) —
+# нарочно, за скорост и детерминизъм. Но точно затова нито един от тях не хвана JSON-retry
+# бурята/345-секундния Критик разговор от реално пускане (2026-08-25) — виж
+# tests/test_llm_client_live.py. `-m "not live"` тук държи тези тестове изключени по
+# подразбиране (не бавят обикновен `pytest`, не изискват .env/мрежа в CI); `pytest -m live`
+# ги пуска изрично.
+addopts = "-m 'not live'"

@@ -2,17 +2,24 @@
 Входна точка: `python -m src.cli [команда] ...` — или направо `linkedin-agent` в PowerShell
 (script entry point от pyproject.toml, `pip install -e .` веднъж го регистрира на PATH).
 
-БЕЗ команда (или `linkedin-agent` без аргументи) се отваря full-screen TUI-то (виж
-src/tui.py) — потребителска инструкция 2026-08-17. Старият readline REPL (src/repl.py,
-подразбиращ се до тогава) остава достъпен изрично през `chat`.
+БЕЗ команда (или `linkedin-agent` без аргументи) се отваря readline REPL-ът (виж src/repl.py)
+— обратно към подразбирането отпреди 2026-08-17. Причина за връщането (потребителска
+инструкция 2026-08-25): full-screen TUI-то (src/tui.py) грабва алтернативния екран на
+терминала, а това изключва native scrollback на терминала самия — за разлика от Claude Code
+CLI (и от REPL-а тук), които пишат нормален, скролиращ изход и не пипат alt-screen въобще.
+Няма компромис между двете: докато full-screen приложение държи alt-screen, никой terminal
+emulator не предлага собствен scrollback върху него — фундаментално ограничение на терминалите,
+не на Textual. TUI-то остава достъпно изрично през `tui`, за който предпочита „премиум"
+изгледа и приема тази цена.
 
 Команди:
-  chat                             — стар readline REPL (ред по ред, /команди)
-  tui                              — full-screen интерфейс (Textual) — същото и БЕЗ команда
-  generate <post_dir> [--force] [--brief "текст"]   — минава през седемте стъпки на конвейера
-                                                        (--brief пише директно briefing.md,
-                                                        създава папката, ако не съществува —
-                                                        без нужда от ръчно отваряне на файл)
+  chat                             — readline REPL (ред по ред, /команди) — същото и БЕЗ команда
+  tui                              — full-screen интерфейс (Textual); БЕЗ native terminal scrollback
+  generate <post_dir> [--force] [--brief "текст"] [--mode кадър|фокус|панорама]
+                                     — минава през седемте стъпки на конвейера (--brief пише
+                                       директно briefing.md, създава папката, ако не
+                                       съществува; --mode избира дължина, виж
+                                       src/pipeline/modes.py, по подразбиране "фокус")
   new <име>                        — създава posts/<име> от шаблона posts/_example
   preview <post_dir>               — output/preview.html (текст + избрани снимки), за визуален
                                      преглед в браузър на вече завършен пост
@@ -36,6 +43,7 @@ from src.brand.loader import audit_knowledge
 from src.config import ConfigError, load_config
 from src.errors import AgentError
 from src.llm.client import LLMClient
+from src.pipeline import modes
 from src.pipeline.preview import render_preview
 from src.pipeline.runner import run_pipeline
 from src.pipeline.util import file_uri
@@ -51,6 +59,14 @@ def cmd_generate(args: argparse.Namespace) -> int:
     brief_text = getattr(args, "brief", None)
 
     force = args.force
+
+    # getattr с подразбиране: тестове/по-стари извиквания конструират Namespace без .mode —
+    # трябва да пада на подразбиращия се режим ("фокус"), не да гърми с AttributeError.
+    mode_arg = getattr(args, "mode", None) or modes.DEFAULT_MODE
+    mode_key = modes.resolve_mode(mode_arg)
+    if mode_key is None:
+        print(f"Грешка: непознат --mode '{mode_arg}'. Налични: {modes.mode_list_text()}")
+        return 1
 
     # --brief е кратък път: пише briefing.md директно от команден ред, вместо `new` +
     # ръчно редактиране на файл.
@@ -76,7 +92,7 @@ def cmd_generate(args: argparse.Namespace) -> int:
     client = LLMClient(config)
 
     try:
-        result = run_pipeline(post_dir, client, force=force)
+        result = run_pipeline(post_dir, client, force=force, mode=mode_key)
     except AgentError as exc:
         # Единствените изключения тук са за вход/инфраструктура — виж докстринга на runner.py.
         print(f"\n✗ Спряно: {exc.human_message}")
@@ -303,6 +319,14 @@ def build_parser() -> argparse.ArgumentParser:
             "папката се създава ако липсва (без нужда от 'new' + ръчно редактиране)"
         ),
     )
+    generate_parser.add_argument(
+        "--mode",
+        default=modes.DEFAULT_MODE,
+        help=(
+            "дължина на поста: кадър/kadar (кратко), фокус/fokus (по подразбиране), "
+            "панорама/panorama (наистина дълго) — виж src/pipeline/modes.py"
+        ),
+    )
     generate_parser.set_defaults(func=cmd_generate)
 
     new_parser = subparsers.add_parser("new", help="създава нова папка за пост от шаблона")
@@ -347,10 +371,10 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     if getattr(args, "func", None) is None:
-        # Без подкоманда — директно full-screen TUI (потребителска инструкция 2026-08-17,
-        # за да работи `linkedin-agent` в PowerShell без аргументи). Старият readline REPL
-        # остава достъпен изрично през `chat`.
-        return cmd_tui(args)
+        # Без подкоманда — readline REPL (потребителска инструкция 2026-08-25: връща
+        # подразбирането отпреди 2026-08-17 заради native terminal scrollback — виж
+        # докстринга на модула). Full-screen TUI остава достъпно изрично през `tui`.
+        return cmd_chat(args)
     return args.func(args)
 
 

@@ -39,7 +39,7 @@ import yaml
 from src.brand.loader import BrandKnowledge
 from src.llm.client import LLMClient
 from src.llm.roles import Role
-from src.llm.schema import CritiqueSchema, FactSource, PlanSchema, RuleViolation, Verdict
+from src.llm.schema import CritiqueSchema, FactSource, ForbiddenCheckSchema, PlanSchema, RuleViolation, Verdict
 from src.pipeline.util import read_text_or_none, should_skip, write_text
 
 CRITIC_PRINCIPLE = (
@@ -312,6 +312,50 @@ def enforce_code_level_rules(
         # което промптът вече дава на модела за "без forbidden нарушения".
         has_unverified_facts = any(fact.source.value == "UNVERIFIED" for fact in critique.facts)
         critique.verdict = Verdict.NEEDS_REVISION if (critique.tone_issues or has_unverified_facts) else Verdict.OK
+
+
+FORBIDDEN_ONLY_SYSTEM_PROMPT_TEMPLATE = """\
+Ти си бърза, тясна проверка в конвейер за LinkedIn постове на ИКТ Клъстер – Варна — НЕ пълният
+Критик. Единствената ти задача: провери подадения текст САМО срещу секцията "ЗАБРАНЕНО" в
+корпуса по-долу (критика или сравнение с конкретна поименно назована фирма/организация,
+политическа позиция, религиозна позиция, здравен/финансов/правен съвет представен като
+препоръка на клъстера, статистика извън източник, идентифициращ детайл за непълнолетно лице
+без документирано съгласие). НЕ проверявай факти, тон или организация без mention_allowed —
+те се проверяват другаде в конвейера, извън тази роля. Празен списък означава "няма
+нарушение", не "не съм проверил".
+
+{brand_context}
+
+Върни САМО JSON:
+{{"rule_violations": [{{"rule": "forbidden", "detail": "..."}}]}}
+
+ВАЖНО за валиден JSON: никога не влагай кавички (нито ASCII ", нито типографски „..." или
+"...") вътре в стойност на низ. Ползвай единични кавички ' или перифразирай без кавички.
+"""
+
+
+def check_forbidden_rules(client: LLMClient, knowledge: BrandKnowledge, text: str) -> list[RuleViolation]:
+    """
+    Стъпка [4] на v5 (src/pipeline/verifier.py) — лека, ЕДИНСТВЕНО-правило проверка на ЕДИН
+    кандидат, ПРЕДИ Съдията да избере измежду тях.
+
+    Затваря пропуск, документиран в докстринга на verifier.py: v5 нарочно не вика пълния
+    Критик (тази LLM роля, но с факти+тон+правила накуп) на кандидат — целта на цялата верига
+    (research-plan-15) — затова досега нарушение на rules/forbidden.md (напр. критика на
+    конкретен конкурент) не се хващаше преди Съдията да избере, само асинхронно СЛЕД избора
+    (стъпка [7], информативно). Тази функция е нарочно много по-лека от пълния Критик (само
+    ЗАБРАНЕНО, без факти/тон/GDPR) — за N паралелни кандидата остава евтина, не връща целия
+    v3 разход, който план 15 се опитваше да премахне.
+
+    GDPR НЕ е тук — остава изцяло код-ниво (enforce_code_level_rules), непроменено; резултатът
+    се филтрира изрично до rule != "gdpr" в случай моделът все пак върне такъв ред.
+    """
+    system = FORBIDDEN_ONLY_SYSTEM_PROMPT_TEMPLATE.format(
+        brand_context=knowledge.stable_context or "(няма зареден brand контекст)",
+    )
+    result = client.complete(Role.CRITIC, text, system=system, schema=ForbiddenCheckSchema)
+    assert isinstance(result, ForbiddenCheckSchema)
+    return [v for v in result.rule_violations if v.rule != "gdpr"]
 
 
 def gdpr_warnings(critique: CritiqueSchema) -> list[str]:

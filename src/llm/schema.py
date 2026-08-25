@@ -133,6 +133,18 @@ class CritiqueSchema(BaseModel):
     summary: str = Field(default="", description="едно изречение обобщение на преценката")
 
 
+class ForbiddenCheckSchema(BaseModel):
+    """
+    Изход на леката "само правила" проверка (v5, src/pipeline/verifier.py — виж
+    critic.check_forbidden_rules). За разлика от CritiqueSchema НЕ проверява факти или тон,
+    само rules/forbidden.md — GDPR остава изцяло код-ниво (critic.enforce_code_level_rules),
+    непроменено. Целта: N бързи, паралелни, тесни LLM извиквания преди Съдията да избере,
+    вместо един тежък Критик на кандидат (какъвто щеше да върне пълния v3 разход).
+    """
+
+    rule_violations: list[RuleViolation] = Field(default_factory=list)
+
+
 class PairwiseReasoning(BaseModel):
     """Обосновката на Съдията (v5) по четирите части на поста — process-4.md, стъпка 5."""
 

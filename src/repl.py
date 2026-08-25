@@ -88,6 +88,7 @@ from src.config import Config, ConfigError, load_config
 from src.errors import AgentError
 from src.llm.client import LLMClient
 from src.logging_utils import register_persistent_handler, unregister_persistent_handler
+from src.pipeline import modes
 from src.pipeline.consolidator import PipelineResult
 from src.pipeline.preview import render_preview
 from src.pipeline.runner import run_pipeline
@@ -113,6 +114,7 @@ HELP_TEXT = """\
 Снимка се прикачва с @път вътре в брифа, с /attach, или просто я провлачи при /wizard.
 
   нов               (или /wizard, /w) — като обикновен ред, но пита за снимки при нужда
+  /mode [режим]     дължина на следващия пост — Кадър/Фокус/Панорама (виж /mode без аргумент)
   /attach <път> …   прикачва снимка, папка със снимки или маска (*.jpg)
   /photos           показва прикаченото; /photos clear го изчиства
   /revise <текст>   пренаписва последния пост с допълнителна инструкция
@@ -411,6 +413,7 @@ class SessionState:
     post_dir: Path | None = None
     brief: str = ""
     revisions: int = 0
+    mode: str = modes.DEFAULT_MODE
 
 
 # --------------------------------------------------------------------------- REPL
@@ -553,6 +556,7 @@ class Repl:
                 f"писател: {self.config.model_writer}",
                 "",
                 "Напиши едно изречение за какво е постът — останалото го решавам сам.",
+                f"Дължина: {modes.get_mode(self.state.mode).label} (по подразбиране) — /mode за Кадър/Панорама.",
                 "Напиши 'нов', ако искаш помощ конкретно със снимки. /help за всички команди.",
             ]
         )
@@ -580,6 +584,7 @@ class Repl:
             "?": self.cmd_help,
             "wizard": self.cmd_wizard,
             "w": self.cmd_wizard,
+            "mode": self.cmd_mode,
             "attach": self.cmd_attach,
             "preview": self.cmd_preview,
             "photos": self.cmd_photos,
@@ -612,6 +617,27 @@ class Repl:
 
     def cmd_clear(self, _argument: str = "") -> None:
         self.out("\033[2J\033[H" if self.ink.enabled else "")
+
+    def cmd_mode(self, argument: str) -> None:
+        """
+        Дължина на СЛЕДВАЩИЯ генериран пост (виж pipeline/modes.py) — Кадър/Фокус/Панорама.
+        Без аргумент показва текущия избор и опциите; с аргумент го сменя. Важи за цялата
+        сесия (включително /again, /revise), докато не се смени пак — не се пита при всеки
+        пост, същия принцип като снимките в /wizard.
+        """
+        if not argument:
+            current = modes.get_mode(self.state.mode)
+            self.out(f"  Текущ режим: {self.ink.accent(current.label)}")
+            self.out(self.ink.dim(f"  Налични: {modes.mode_list_text()}"))
+            self.out(self.ink.dim("  Смяна: /mode кадър · /mode фокус · /mode панорама"))
+            return
+        key = modes.resolve_mode(argument)
+        if key is None:
+            self.out(self.ink.err(f"Непознат режим '{argument}'. Налични: {modes.mode_list_text()}"))
+            return
+        self.state.mode = key
+        chosen = modes.get_mode(key)
+        self.out(self.ink.ok(f"  ✓ Режим: {chosen.label} — важи от следващия пост нататък."))
 
     def cmd_attach(self, argument: str) -> None:
         if not argument:
@@ -898,7 +924,9 @@ class Repl:
 
         try:
             result = self._run_with_spinner(
-                lambda: self.pipeline_fn(post_dir, client, force=force, knowledge=self.knowledge)
+                lambda: self.pipeline_fn(
+                    post_dir, client, force=force, knowledge=self.knowledge, mode=self.state.mode
+                )
             )
         except AgentError as exc:
             # Критикът вече не спира конвейера (виж runner.py), така че тук идват само
@@ -921,25 +949,6 @@ class Repl:
         text = (read_text_or_none(result.post_path) or "").strip()
         self._print_post(text)
 
-        # Копиране в клипборда вместо ръчно маркиране от терминала — best-effort, тих провал.
-        if text and self.clipboard_fn(text):
-            self.out(self.ink.dim("  📋 копирано в клипборда"))
-
-        merged = " + ".join(result.merged_from) or "?"
-        status = self.ink.ok("✓ предложение") if result.status == "ready" else self.ink.warn("⚠ предложение с бележки")
-        calls = len(client.call_log)
-        self.out(f"  {status} {self.ink.dim(f'· от {merged} · {calls} извиквания · {elapsed:.0f}s')}")
-        self.out(self.ink.dim(f"  файл:    {file_uri(result.post_path)}"))
-
-        # Автоматичен преглед след всяко успешно пускане (потребителска заявка 2026-08-18) —
-        # преди изискваше ръчно /preview. Best-effort: развален преглед не бива да съсипва
-        # вече готовото предложение по-горе.
-        try:
-            preview_path = render_preview(post_dir)
-            self.out(self.ink.dim(f"  преглед: {file_uri(preview_path)}"))
-        except (FileNotFoundError, OSError) as exc:
-            self.out(self.ink.dim(f"  ⚠ Прегледът не се генерира: {exc}"))
-
         if result.resolution_summary:
             self.out(self.ink.dim(f"  {result.resolution_summary}"))
 
@@ -951,6 +960,33 @@ class Repl:
             self.out(self.ink.warn(f"  ⚠ {warning}"))
         if result.open_notes or result.warnings:
             self.out(self.ink.dim("  Бележките не спират поста — прегледай ги преди публикуване."))
+
+        # Статус, копиране и линк за браузъра НАРОЧНО последни — след всички бележки, не преди
+        # тях (потребителска обратна връзка 2026-08-25: "отдолу да дава линк за в браузъра" —
+        # с дълъг списък бележки линкът по-рано лесно се скриваше нагоре в скрола на терминала).
+        merged = " + ".join(result.merged_from) or "?"
+        status = self.ink.ok("✓ предложение") if result.status == "ready" else self.ink.warn("⚠ предложение с бележки")
+        calls = len(client.call_log)
+        mode_label = modes.get_mode(self.state.mode).label
+        self.out(
+            f"  {status} "
+            f"{self.ink.dim(f'· {mode_label} · от {merged} · {len(text.split())} думи · {calls} извиквания · {elapsed:.0f}s')}"
+        )
+        self.out(self.ink.dim(f"  файл:    {file_uri(result.post_path)}"))
+
+        # Копиране в клипборда вместо ръчно маркиране от терминала — best-effort, тих провал.
+        if text and self.clipboard_fn(text):
+            self.out(self.ink.dim("  📋 копирано в клипборда"))
+
+        # Автоматичен преглед след всяко успешно пускане (потребителска заявка 2026-08-18) —
+        # реалистичният изглед (текст + избрани снимки в браузър), не суровият .md файл
+        # по-горе. Best-effort: развален преглед не бива да съсипва вече готовото предложение.
+        try:
+            preview_path = render_preview(post_dir)
+            self.out(self.ink.accent(f"  🔗 Отвори в браузър (реалистичен изглед): {file_uri(preview_path)}"))
+        except (FileNotFoundError, OSError) as exc:
+            self.out(self.ink.dim(f"  ⚠ Прегледът не се генерира: {exc}"))
+
         self.out(self.ink.dim("  /revise <инструкция> дошлайфа този пост · /preview за визуален изглед · нов ред = нов пост"))
 
     def cmd_preview(self, _argument: str = "") -> None:

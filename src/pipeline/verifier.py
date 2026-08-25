@@ -14,18 +14,34 @@ LLM, който отговаря на собствени верификацио�
 буквалното съвпадение пропуска покритие, остават извън обхвата тук — маркирано изрично в
 план 15, Недоказани твърдения, не подмятано като пълно решение.
 
-GDPR/forbidden проверките на код ниво (critic.enforce_code_level_rules) остават НЕПОКЪТНАТИ
-и се пускат тук върху всеки кандидат — process-4.md, стъпка 4: "GDPR и rules/forbidden.md
-остават както са... изпълнява се непроменен, върху всеки кандидат."
+GDPR проверките на код ниво (critic.enforce_code_level_rules) остават НЕПОКЪТНАТИ и се
+пускат тук върху всеки кандидат — process-4.md, стъпка 4: "GDPR... се изпълнява непроменен,
+върху всеки кандидат."
+
+ЗАТВОРЕН ПРОПУСК (2026-08-25, беше "известен, съзнателен" в предишна версия на този
+докстринг): `enforce_code_level_rules` хваща само GDPR (лично име извън брифа / организация
+без mention_allowed) — НЕ нарушения на rules/forbidden.md (напр. "критикува конкретен
+конкурент"), защото това е семантична преценка, не регекс. v5 нарочно не вика ПЪЛНИЯ LLM
+Критик (факти+тон+правила накуп) върху отделните кандидати — целта на цялата верига, план
+15 — затова forbidden.md нарушение не можеше да се хване преди Съдията да избере, само
+асинхронно СЛЕД избора (стъпка [7], информативно, твърде късно за реален pre-publish риск).
+
+Затворено с `critic.check_forbidden_rules()` — умишлено МНОГО по-лека LLM проверка от пълния
+Критик (само секцията ЗАБРАНЕНО, без факти/тон/GDPR), викана паралелно за всеки кандидат в
+`check_all()` по-долу. Не връща пълния v3 разход (план 15 се опитваше точно да го премахне),
+но затваря реалната дупка: `CandidateVerification.blocked` вече РЕАЛНО получава "forbidden"
+находки, не само теоретично поддържа полето.
 """
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from src.brand.loader import BrandKnowledge
+from src.llm.client import LLMClient
 from src.llm.schema import CritiqueSchema, RuleViolation, Verdict
 from src.pipeline import critic
 from src.pipeline.facts_pool import FactsPool
@@ -85,8 +101,13 @@ def check_candidate(
     briefing_text: str,
     pool: FactsPool,
     knowledge: BrandKnowledge,
+    client: LLMClient,
 ) -> CandidateVerification:
-    """Проверява ЕДИН кандидат: твърдения срещу facts_pool + GDPR/forbidden на код ниво."""
+    """
+    Проверява ЕДИН кандидат: твърдения срещу facts_pool (код) + GDPR (код) +
+    rules/forbidden.md (лека LLM проверка — виж critic.check_forbidden_rules и докстринга
+    на модула за защо това последното е единственото извикване към модел тук).
+    """
     allowed = pool.allowed_strings() + [briefing_text]
     raw_claims = sorted(set(find_proper_nouns(text) + find_numbers(text)))
     claims = [ClaimVerification(claim=claim, verified=_claim_is_covered(claim, allowed)) for claim in raw_claims]
@@ -95,7 +116,10 @@ def check_candidate(
     throwaway = CritiqueSchema(verdict=Verdict.OK)
     critic.enforce_code_level_rules(throwaway, text, briefing_text, knowledge.members)
 
-    return CandidateVerification(filename=filename, claims=claims, rule_violations=throwaway.rule_violations)
+    violations = list(throwaway.rule_violations)
+    violations.extend(critic.check_forbidden_rules(client, knowledge, text))
+
+    return CandidateVerification(filename=filename, claims=claims, rule_violations=violations)
 
 
 def check_all(
@@ -104,10 +128,17 @@ def check_all(
     briefing_text: str,
     pool: FactsPool,
     knowledge: BrandKnowledge,
+    client: LLMClient,
     *,
     force: bool = False,
 ) -> list[CandidateVerification]:
-    """Проверява всички кандидати и записва facts_check.json. Възобновяемост както навсякъде."""
+    """
+    Проверява всички кандидати и записва facts_check.json. Възобновяемост както навсякъде.
+
+    Единственото LLM извикване тук (check_forbidden_rules) тече ПАРАЛЕЛНО за всички
+    кандидати — огледално на writer.write_candidates — за да не сериализира N леки
+    извиквания едно след друго и да изяде обратно спестеното от план 15 време.
+    """
     check_path = post_dir / FACTS_CHECK_FILENAME
     if should_skip(check_path, force=force):
         data = read_json(check_path)
@@ -126,6 +157,14 @@ def check_all(
         # Записаният файл не съвпада с текущия набор кандидати (напр. N се е сменило) —
         # преизчислява наново, вместо да върне непълен/несъответстващ резултат.
 
-    results = [check_candidate(filename, text, briefing_text, pool, knowledge) for filename, text in candidates]
+    if not candidates:
+        results: list[CandidateVerification] = []
+    else:
+        with ThreadPoolExecutor(max_workers=len(candidates)) as executor:
+            futures = [
+                executor.submit(check_candidate, filename, text, briefing_text, pool, knowledge, client)
+                for filename, text in candidates
+            ]
+            results = [future.result() for future in futures]
     write_json(check_path, {"candidates": [r.to_dict() for r in results]})
     return results

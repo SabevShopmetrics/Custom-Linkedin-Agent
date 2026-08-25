@@ -24,7 +24,7 @@ class FakePipeline:
         self.raises = raises
 
     def __call__(self, post_dir: Path, client, *, force: bool = False, knowledge=None, **kwargs) -> PipelineResult:
-        self.calls.append({"post_dir": post_dir, "force": force, "knowledge": knowledge})
+        self.calls.append({"post_dir": post_dir, "force": force, "knowledge": knowledge, "mode": kwargs.get("mode")})
         if self.raises is not None:
             raise self.raises
         output_dir = post_dir / "output"
@@ -103,6 +103,34 @@ def test_submitting_a_brief_runs_the_pipeline_and_shows_the_post(tmp_path):
             assert "visible" in output.classes
             output_text = app.query_one("#output-text")
             assert "Готов пост от TUI теста." in str(output_text.content)
+
+    run(scenario())
+
+
+def test_mode_command_switches_mode_and_is_passed_to_the_pipeline(tmp_path):
+    async def scenario():
+        pipeline = FakePipeline()
+        app = make_app(tmp_path, pipeline)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            await pilot.click("#brief")
+            await pilot.press(*"/mode панорама")
+            await pilot.press("enter")
+            await pilot.pause()
+
+            log = app.query_one("#log")
+            text = "\n".join(str(line) for line in log.lines)
+            assert "Панорама" in text
+            assert app.mode == "panorama"
+            assert pipeline.calls == []  # /mode е команда, не бриф — не тръгва конвейер
+
+            await pilot.press(*"Тестово събитие")
+            await pilot.press("enter")
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+            assert len(pipeline.calls) == 1
+            assert pipeline.calls[0]["mode"] == "panorama"
 
     run(scenario())
 

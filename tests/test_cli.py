@@ -32,7 +32,7 @@ def test_generate_with_brief_creates_folder_and_writes_briefing(tmp_path, monkey
     monkeypatch.setattr(cli, "load_config", lambda: _fake_config())
     monkeypatch.setattr(cli, "LLMClient", lambda config: object())
 
-    def fake_run_pipeline(pd, client, *, force):
+    def fake_run_pipeline(pd, client, *, force, mode=None):
         captured_force["value"] = force
 
         class Result:
@@ -77,7 +77,7 @@ def test_generate_without_brief_uses_explicit_force_flag(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "load_config", lambda: _fake_config())
     monkeypatch.setattr(cli, "LLMClient", lambda config: object())
 
-    def fake_run_pipeline(pd, client, *, force):
+    def fake_run_pipeline(pd, client, *, force, mode=None):
         captured_force["value"] = force
 
         class Result:
@@ -98,3 +98,21 @@ def test_generate_without_brief_uses_explicit_force_flag(tmp_path, monkeypatch):
     cli.cmd_generate(args)
 
     assert captured_force["value"] is True
+
+
+def test_no_subcommand_opens_the_repl_not_the_tui(monkeypatch):
+    """
+    Потребителска инструкция 2026-08-25: обратно към readline REPL по подразбиране (както
+    отпреди 2026-08-17) — full-screen TUI грабва alt-screen буфера на терминала, което
+    изключва native scrollback (за разлика от Claude Code CLI и от REPL-а тук). TUI остава
+    достъпно изрично през `tui`.
+    """
+    calls = []
+    monkeypatch.setattr(cli, "cmd_chat", lambda args: calls.append("chat") or 0)
+    monkeypatch.setattr(cli, "cmd_tui", lambda args: calls.append("tui") or 0)
+    monkeypatch.setattr(cli, "force_utf8_io", lambda: None)
+
+    exit_code = cli.main([])
+
+    assert exit_code == 0
+    assert calls == ["chat"]

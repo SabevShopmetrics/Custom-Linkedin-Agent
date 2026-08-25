@@ -10,7 +10,9 @@ docs/technical/process-3.md):
   [4] Критик върху Post I → critique.md — намира слабостите
   [5] Писател → post_ii.md — ВТОРИ пост, който запълва тези слабости
   [6] Консолидатор → output/post.md — официалното предложение ОТ ДВАТА поста
-  [7] Критик върху предложението → critique_final.md — само констатира какво остава открито
+  [7] Критик върху предложението → critique_final.md — само констатира какво остава открито,
+      АСИНХРОННО от 2026-08-25 (виж _start_async_final_check) — не блокира резултата,
+      реални пускания показаха 70-350+ секунди чисто чакане за информативна стъпка
 
 Какво се смени и защо: дотогава Критикът беше вето. Присъда needs_revision пращаше
 Писателя на до 2 опита да пренапише същия текст, а после конвейерът спираше с needs_human
@@ -28,8 +30,10 @@ docs/technical/process-3.md):
 
 Никоя присъда на Критика вече не хвърля изключение. Изключения остават само за вход и
 инфраструктура: липсващ/нередактиран бриф (преди LLM извикванията) и недостъпен модел.
-Стъпки 5, 6 и 7 са допълнително подсигурени — ако някоя от тях се счупи, конвейерът
-записва каквото има и отбелязва това като открит въпрос, вместо да остави човека без текст.
+Стъпки 5 и 6 са допълнително подсигурени — ако някоя от тях се счупи, конвейерът записва
+каквото има и отбелязва това като открит въпрос, вместо да остави човека без текст. Стъпка 7
+е асинхронна (виж по-горе) — грешка там се логва в run.log на фоновия thread, не стига до
+резултата, който човекът вече е видял.
 
 Верига v5 — условна, зад `PIPELINE_CHAIN=v5` в .env (подразбиране остава v3). Надгражда
 docs/technical/process-4.md (никога построена в код) по
@@ -38,7 +42,11 @@ docs/research-plans/research-plan-15-pipeline-speed-quality-rearchitecture.md:
   [1]   Планер                                              (непроменено)
   [1.5] Факт-регистър → facts_pool.json                      код, не LLM
   [2]/[3] Писател × N кандидата + Media Picker (паралелно)   независими кандидати
-  [4]   Филтър за проследимост → facts_check.json            код, не LLM
+  [4]   Филтър за проследимост → facts_check.json            код (факти/GDPR) + лека
+                                                               паралелна LLM проверка само
+                                                               за rules/forbidden.md на
+                                                               кандидат (2026-08-25 — виж
+                                                               verifier.py защо не е "без LLM")
   [5]   Съдия (pairwise) → judgement.json                    избира, НЕ пише
   [6]   Механичните правила (formatting.py)                  (непроменено)
   [7]   Финален критик — АСИНХРОННО, не блокира резултата
@@ -52,6 +60,7 @@ docs/research-plans/research-plan-15-pipeline-speed-quality-rearchitecture.md:
 
 from __future__ import annotations
 
+import dataclasses
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -61,7 +70,7 @@ from src.brand.loader import BrandKnowledge, load_brand_knowledge
 from src.errors import AgentError, BriefingMissingError, BriefingNotFilledError
 from src.llm.client import LLMClient
 from src.logging_utils import setup_run_logger
-from src.pipeline import consolidator, critic, facts_pool, formatting, judge, media_picker, planner, verifier, writer
+from src.pipeline import consolidator, critic, facts_pool, formatting, judge, media_picker, modes, planner, verifier, writer
 from src.pipeline.consolidator import PipelineResult
 from src.pipeline.util import read_json, read_text_or_none, write_json, write_text
 
@@ -90,6 +99,41 @@ def _resolution_summary(initial_count: int, final_count: int) -> str:
     )
 
 
+def _effective_format_rules(knowledge: BrandKnowledge, mode: modes.PostMode) -> "formatting.FormatRules":
+    """
+    FormatRules на корпуса, с думите-диапазон заменени от избрания режим за дължина
+    (pipeline/modes.py), ако той има мнение (words_min не е None). "Фокус" няма мнение —
+    връща знанието непроменено, тоест поведението без изричен избор на режим е точно
+    същото, каквото беше преди модовете да съществуват.
+    """
+    if mode.words_min is None and mode.words_max is None:
+        return knowledge.format_rules
+    return dataclasses.replace(knowledge.format_rules, words_min=mode.words_min, words_max=mode.words_max)
+
+
+def _ai_act_meta() -> dict:
+    """
+    Бележка за EU AI Act, чл. 50 — чисто добавъчна метаданна (план 15, Част 2.9). НЕ твърди
+    категорично дали маркировка е нужна — това зависи от бъдеща политика за автономно
+    публикуване без преглед, извън обхвата на runner.py. Подготовка, не присъда.
+
+    До 2026-08-25 това се пишеше само в _run_pipeline_v5 — v3 (verigата, по подразбиране)
+    нямаше НИКАКВА следа от тази проверка в meta.json. Изнесено тук като споделена функция,
+    за да получат двете вериги еднакво покритие, без да се дублира текстът на бележката.
+    """
+    return {
+        "ai_act": {
+            "note": (
+                "Изключението за 'съществен човешки преглед' по чл. 50, ал. 4 вероятно важи, "
+                "докато всеки пост минава през човек преди публикуване (виж "
+                "research-plan-15-pipeline-speed-quality-rearchitecture.md, Част 2.9). "
+                "Полето е подготовка за деня, в който автономно публикуване без преглед "
+                "стане реалност — тогава машинно-четима маркировка вероятно става задължителна."
+            ),
+        }
+    }
+
+
 def _is_unfilled_template(briefing_text: str, template_path: Path = EXAMPLE_BRIEFING_PATH) -> bool:
     """
     Точно сравнение срещу posts/_example/briefing.md — хваща най-честия случай (`new` без
@@ -109,13 +153,19 @@ def run_pipeline(
     *,
     force: bool = False,
     knowledge: BrandKnowledge | None = None,
+    mode: str | None = None,
 ) -> PipelineResult:
     """
     Валидира входа (общо за двете вериги), после разклонява на v3 (подразбиране) или v5
     според `client.config.pipeline_chain` — изборът е конфигурация, не код (process-4.md,
     Част 0). Тестови дубли без `.config` (виж tests/) падат обратно на v3, непроменено.
+
+    `mode` е режимът за дължина (pipeline/modes.py — "kadar"/"fokus"/"panorama"), избран
+    ИЗРИЧНО от човека (REPL `/mode`, TUI `/mode`, CLI `--mode`), никога извеждан от модел.
+    None/непознат/подразбиращ се "fokus" не пипа нищо — точно старото поведение.
     """
     log = setup_run_logger(post_dir)
+    mode_obj = modes.get_mode(mode)
 
     briefing_path = post_dir / "briefing.md"
     briefing_text = read_text_or_none(briefing_path)
@@ -134,11 +184,18 @@ def run_pipeline(
     if chain not in ("v3", "v5"):
         chain = "v3"  # непозната стойност в .env → безопасно подразбиране, не изключение
 
-    log.info("=== Ново пускане на конвейера за '%s' (force=%s, chain=%s) ===", post_dir, force, chain)
+    log.info(
+        "=== Ново пускане на конвейера за '%s' (force=%s, chain=%s, режим=%s) ===",
+        post_dir, force, chain, mode_obj.label,
+    )
 
     if chain == "v5":
-        return _run_pipeline_v5(post_dir, client, force=force, knowledge=knowledge, briefing_text=briefing_text, log=log)
-    return _run_pipeline_v3(post_dir, client, force=force, knowledge=knowledge, briefing_text=briefing_text, log=log)
+        return _run_pipeline_v5(
+            post_dir, client, force=force, knowledge=knowledge, briefing_text=briefing_text, log=log, mode=mode_obj
+        )
+    return _run_pipeline_v3(
+        post_dir, client, force=force, knowledge=knowledge, briefing_text=briefing_text, log=log, mode=mode_obj
+    )
 
 
 # ============================================================================ v3 (подразбиране)
@@ -152,9 +209,11 @@ def _run_pipeline_v3(
     knowledge: BrandKnowledge,
     briefing_text: str,
     log,
+    mode: modes.PostMode = modes.get_mode(None),
 ) -> PipelineResult:
     warnings: list[str] = []
     open_notes: list[str] = []
+    effective_rules = _effective_format_rules(knowledge, mode)
 
     # Стъпки 1-4 НЕ са подсигурени като 5/6/7 (виж докстринга на модула) — грешка тук спира
     # целия run. Ако е AgentError (напр. ModelUnavailableError), детайлът (суровата причина
@@ -177,7 +236,14 @@ def _run_pipeline_v3(
         log.info("[2]/[3] Писател + Media Picker (паралелно)...")
         with ThreadPoolExecutor(max_workers=2) as executor:
             draft_future = executor.submit(
-                writer.write_first_draft, post_dir, client, knowledge, plan, briefing_text, force=force
+                writer.write_first_draft,
+                post_dir,
+                client,
+                knowledge,
+                plan,
+                briefing_text,
+                force=force,
+                mode_instruction=mode.instruction,
             )
             media_future = executor.submit(media_picker.run, post_dir, client, plan, briefing_text, force=force)
             post_i_text = draft_future.result()
@@ -201,7 +267,7 @@ def _run_pipeline_v3(
         # Потребителска инструкция 2026-08-17: минимумът трябва реално да се приложи, не
         # само да се отбележи. Код-ниво проверка тук (детерминирана, не LLM преценка),
         # инжектирана директно в findings — същия модел като GDPR проверките на критика.
-        words_min = knowledge.format_rules.words_min
+        words_min = effective_rules.words_min
         post_i_words = len(post_i_text.split())
         if words_min is not None and post_i_words < words_min:
             findings.append(
@@ -236,6 +302,7 @@ def _run_pipeline_v3(
                 findings,
                 output_filename=SECOND_POST_FILENAME,
                 force=force,
+                mode_instruction=mode.instruction,
             )
             log.info("[5] Post II: %d думи", len(post_ii_text.split()))
         except AgentError as exc:
@@ -287,7 +354,7 @@ def _run_pipeline_v3(
     # [6б] Механичните правила от корпуса — налагат се в кода, не се оставят на модел.
     # Върви ПРЕДИ финалната проверка, за да не хаби Критикът бележки за вече поправени неща,
     # и ПРЕДИ записа, за да е output/post.md винаги публикуем.
-    formatted = formatting.enforce(official_text, knowledge.format_rules, brief_text=briefing_text)
+    formatted = formatting.enforce(official_text, effective_rules, brief_text=briefing_text)
     applied_fixes = formatted.fixes
     if formatted.text != official_text:
         official_text = formatted.text
@@ -299,38 +366,6 @@ def _run_pipeline_v3(
     for note in formatted.notes:
         log.info("[6б] бележка: %s", note)
     open_notes.extend(formatted.notes)
-
-    # [7] Критик върху предложението — само констатира, не спира. Целта е човекът да види
-    # какво остава открито в текста, който реално ще публикува, а не в междинна чернова.
-    log.info("[7] Критик върху предложението (информативно)...")
-    resolution_summary: str | None = None
-    try:
-        final_critique = critic.run(
-            post_dir,
-            client,
-            knowledge,
-            plan,
-            briefing_text,
-            official_text,
-            filename=FINAL_CRITIQUE_FILENAME,
-            force=force,
-        )
-        final_notes = critic.review_notes(final_critique)
-        open_notes.extend(final_notes)
-        log.info("[7] %d открити въпроса в предложението", len(final_notes))
-        for note in final_notes:
-            log.info("[7] открит въпрос: %s", note)
-
-        # Критикът вижда текста два пъти (Post I тук горе, крайния текст точно сега), но
-        # дотук никой не сравняваше двете числа — виж
-        # docs/research-plans/research-plan-13-critic-resolution-visibility.md. Чисто
-        # аритметика върху вече изчислени стойности, без нов LLM разход.
-        if findings:
-            resolution_summary = _resolution_summary(len(findings), len(final_notes))
-            log.info("[7] %s", resolution_summary)
-    except AgentError as exc:
-        open_notes.append(f"Финалната проверка не успя ({exc.human_message}) — прегледайте текста ръчно.")
-        log.error("[7] Финалната проверка се счупи: %s", exc.human_message)
 
     if any(item.possible_minor for item in media_selection.selected):
         warning_text = (
@@ -345,7 +380,7 @@ def _run_pipeline_v3(
     for note in open_notes:
         log.warning("Открит въпрос: %s", note)
 
-    return consolidator.finalize(
+    result = consolidator.finalize(
         post_dir,
         client,
         plan,
@@ -356,8 +391,21 @@ def _run_pipeline_v3(
         warnings=warnings,
         merged_from=merged_from,
         applied_fixes=applied_fixes,
-        resolution_summary=resolution_summary,
+        resolution_summary=None,
+        extra_meta=_ai_act_meta(),
     )
+
+    # [7] Критик върху предложението — АСИНХРОННО, огледално на v5's _start_async_final_check
+    # (виж докстринга там). Потребителска инструкция 2026-08-25 ("~600 секунди, оправи го"):
+    # реален run.log показа тази стъпка да отнема 70-350+ секунди — чисто информативна (не
+    # пипа official_text/output/post.md, само докладва какво остава открито), но досега
+    # блокираше отговора на човека точно толкова дълго. Бележките и resolution_summary
+    # (план 13) се дописват в meta.json, щом фоновата проверка приключи. Известно ограничение,
+    # същото като в v5: TUI/REPL, вече показали резултата, не се обновяват визуално.
+    log.info("[7] Критик върху предложението (async, информативно)...")
+    _start_async_final_check(post_dir, client, knowledge, plan, briefing_text, official_text, findings=findings)
+
+    return result
 
 
 # ============================================================================ v5 (PIPELINE_CHAIN=v5)
@@ -371,6 +419,7 @@ def _run_pipeline_v5(
     knowledge: BrandKnowledge,
     briefing_text: str,
     log,
+    mode: modes.PostMode = modes.get_mode(None),
 ) -> PipelineResult:
     """
     Виж докстринга на модула за схемата. Разлика от v3, накратко: няма Post II/Консолидатор
@@ -381,6 +430,7 @@ def _run_pipeline_v5(
     open_notes: list[str] = []
     config = client.config  # само v5 стигна дотук, значи client.config съществува (виж run_pipeline)
     n = max(1, config.writer_candidates)
+    effective_rules = _effective_format_rules(knowledge, mode)
 
     try:
         # [1] Планер — идентично на v3.
@@ -404,7 +454,16 @@ def _run_pipeline_v5(
         log.info("[2]/[3] Писател × %d кандидата + Media Picker (паралелно)...", n)
         with ThreadPoolExecutor(max_workers=2) as executor:
             candidates_future = executor.submit(
-                writer.write_candidates, post_dir, client, knowledge, plan, briefing_text, pool, n=n, force=force
+                writer.write_candidates,
+                post_dir,
+                client,
+                knowledge,
+                plan,
+                briefing_text,
+                pool,
+                n=n,
+                force=force,
+                mode_instruction=mode.instruction,
             )
             media_future = executor.submit(media_picker.run, post_dir, client, plan, briefing_text, force=force)
             candidates = candidates_future.result()
@@ -416,9 +475,11 @@ def _run_pipeline_v5(
         for item in media_selection.selected:
             log.info("[2]/[3] снимка: %s — %s", item.filename, item.reason)
 
-        # [4] Филтър за проследимост — код, не LLM (виж src/pipeline/verifier.py).
-        log.info("[4] Филтър за проследимост (код, без LLM извикване)...")
-        verifications = verifier.check_all(post_dir, candidates, briefing_text, pool, knowledge, force=force)
+        # [4] Филтър за проследимост — код (факти/GDPR) + лека паралелна LLM проверка само
+        # за rules/forbidden.md на всеки кандидат (виж докстринга на verifier.py защо това
+        # вече не е "без LLM извикване" — затваря pre-selection пропуск от план 15).
+        log.info("[4] Филтър за проследимост (код + лека проверка на правила)...")
+        verifications = verifier.check_all(post_dir, candidates, briefing_text, pool, knowledge, client, force=force)
         for v in verifications:
             blocked_note = " · БЛОКИРАН (rules/forbidden.md)" if v.blocked else ""
             log.info("[4] %s: %d непроследими твърдения%s", v.filename, v.unverified_count, blocked_note)
@@ -452,7 +513,7 @@ def _run_pipeline_v5(
     write_text(post_dir / "output" / "post.md", official_text + "\n")
 
     # [6] Механичните правила от корпуса — идентично на v3's [6б].
-    formatted = formatting.enforce(official_text, knowledge.format_rules, brief_text=briefing_text)
+    formatted = formatting.enforce(official_text, effective_rules, brief_text=briefing_text)
     applied_fixes = formatted.fixes
     if formatted.text != official_text:
         official_text = formatted.text
@@ -478,21 +539,6 @@ def _run_pipeline_v5(
     for note in open_notes:
         log.warning("Открит въпрос: %s", note)
 
-    # [8] Бележка за EU AI Act, чл. 50 — чисто добавъчна метаданна (план 15, Част 2.9).
-    # НЕ твърди категорично дали маркировка е нужна — това зависи от бъдеща политика за
-    # автономно публикуване без преглед, извън обхвата на runner.py. Подготовка, не присъда.
-    ai_act_meta = {
-        "ai_act": {
-            "note": (
-                "Изключението за 'съществен човешки преглед' по чл. 50, ал. 4 вероятно важи, "
-                "докато всеки пост минава през човек преди публикуване (виж "
-                "research-plan-15-pipeline-speed-quality-rearchitecture.md, Част 2.9). "
-                "Полето е подготовка за деня, в който автономно публикуване без преглед "
-                "стане реалност — тогава машинно-четима маркировка вероятно става задължителна."
-            ),
-        }
-    }
-
     result = consolidator.finalize(
         post_dir,
         client,
@@ -505,7 +551,7 @@ def _run_pipeline_v5(
         merged_from=merged_from,
         applied_fixes=applied_fixes,
         resolution_summary=None,
-        extra_meta=ai_act_meta,
+        extra_meta=_ai_act_meta(),
     )
 
     # [7] Финален критик — АСИНХРОННО (план 15, Част 4/1.1: тази стъпка сама изяжда ~70s в
@@ -516,10 +562,13 @@ def _run_pipeline_v5(
     return result
 
 
-def _start_async_final_check(post_dir, client, knowledge, plan, briefing_text, official_text) -> None:
+def _start_async_final_check(
+    post_dir, client, knowledge, plan, briefing_text, official_text, *, findings: list[str] | None = None
+) -> None:
     """
-    Стъпка [7] на v5 — тече във фонов daemon thread, за да не блокира вече показания на
-    човека резултат.
+    Стъпка [7], извън критичния път — тече във фонов daemon thread, за да не блокира вече
+    показания на човека резултат. Споделена между v3 и v5 (v3 я вика с `findings`, за да
+    получи и resolution_summary — план 13; v5 не подава findings, само бележките).
 
     НЕ използва logging.getLogger(LOGGER_NAME) (src/logging_utils.py): setup_run_logger()
     чисти handler-ите на ВСЕКИ извикване, а ако междувременно потребителят пусне НОВ пост
@@ -551,7 +600,16 @@ def _start_async_final_check(post_dir, client, knowledge, plan, briefing_text, o
             _append_run_log(log_path, f"[7] {len(final_notes)} открити въпроса в предложението (async)")
             for note in final_notes:
                 _append_run_log(log_path, f"[7] открит въпрос: {note}")
-            _merge_async_notes_into_meta(post_dir, final_notes)
+
+            # Само v3 подава findings (Критикът на Post I) — v5 няма аналог (пише N
+            # независими кандидата, не Post I → Post II), затова там resolution_summary
+            # остава None, точно както преди.
+            resolution_summary = None
+            if findings:
+                resolution_summary = _resolution_summary(len(findings), len(final_notes))
+                _append_run_log(log_path, f"[7] {resolution_summary}")
+
+            _merge_async_notes_into_meta(post_dir, final_notes, resolution_summary=resolution_summary)
         except AgentError as exc:
             _append_run_log(log_path, f"[7] Финалната проверка (async) се счупи: {exc.human_message}")
 
@@ -566,7 +624,9 @@ def _append_run_log(log_path: Path, message: str) -> None:
         handle.write(f"{timestamp} [INFO] {message}\n")
 
 
-def _merge_async_notes_into_meta(post_dir: Path, final_notes: list[str]) -> None:
+def _merge_async_notes_into_meta(
+    post_dir: Path, final_notes: list[str], *, resolution_summary: str | None = None
+) -> None:
     """
     Дописва находките от асинхронната проверка в output/meta.json СЛЕД като той вече е
     записан от consolidator.finalize() по-горе — read-merge-write, за да не се загуби
@@ -574,15 +634,21 @@ def _merge_async_notes_into_meta(post_dir: Path, final_notes: list[str]) -> None
     картина, щом фоновата проверка приключи. TUI/REPL, които вече са показали резултата на
     екрана, НЕ се обновяват визуално — известно, документирано ограничение (план 15,
     Недоказани твърдения), не пропуск.
+
+    `resolution_summary` (само от v3, виж _start_async_final_check): записва се дори когато
+    `final_notes` е празен списък — точно тогава е най-интересен ("напълно адресирани").
     """
     meta_path = post_dir / "output" / "meta.json"
-    if not meta_path.exists() or not final_notes:
+    if not meta_path.exists() or (not final_notes and resolution_summary is None):
         return
     try:
         meta = read_json(meta_path)
     except (OSError, ValueError):
         return
-    meta["open_notes"] = list(meta.get("open_notes", [])) + list(final_notes)
-    if meta.get("status") == "ready":
-        meta["status"] = "ready_with_notes"
+    if final_notes:
+        meta["open_notes"] = list(meta.get("open_notes", [])) + list(final_notes)
+        if meta.get("status") == "ready":
+            meta["status"] = "ready_with_notes"
+    if resolution_summary is not None:
+        meta["resolution_summary"] = resolution_summary
     write_json(meta_path, meta)

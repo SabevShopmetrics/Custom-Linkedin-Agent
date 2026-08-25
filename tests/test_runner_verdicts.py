@@ -13,6 +13,9 @@
 
 from __future__ import annotations
 
+import json
+import threading
+import time
 from typing import Any
 
 from src.brand.format_rules import parse_format_rules
@@ -36,6 +39,26 @@ PLAN = PlanSchema(
 )
 
 CLEAN_CRITIQUE = CritiqueSchema(verdict=Verdict.OK, facts=[], tone_issues=[], rule_violations=[], summary="")
+
+
+def _wait_for_async_final_check(post_dir, *, timeout: float = 5.0) -> dict:
+    """
+    Стъпка [7] на v3 стана асинхронна 2026-08-25 (виж runner.py::_start_async_final_check,
+    потребителска заявка да не блокира резултата ~70-350+ секунди за чисто информативна
+    стъпка). `result.open_notes`/`result.status`, върнати СИНХРОННО от run_pipeline(), вече
+    НЕ съдържат находките от тази стъпка — те се дописват в output/meta.json от фонов thread.
+    Тестове, които проверяват точно тези находки, трябва да изчакат нишката (по име, зададено
+    в _start_async_final_check) и после да прочетат meta.json — оттук е реалният извор.
+    """
+    thread_name = f"final-check-{post_dir.name}"
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        threads = [t for t in threading.enumerate() if t.name == thread_name]
+        if not threads:
+            break
+        for t in threads:
+            t.join(timeout=0.05)
+    return json.loads((post_dir / "output" / "meta.json").read_text(encoding="utf-8"))
 
 def tone_critique(*issues: str) -> CritiqueSchema:
     return CritiqueSchema(
@@ -147,6 +170,22 @@ def test_no_findings_skips_the_second_post(tmp_path):
     assert result.merged_from == ["post_i.md"]
     assert not (post_dir / "post_ii.md").exists()
 
+def test_v3_meta_json_includes_ai_act_note(tmp_path):
+    """
+    До 2026-08-25 бележката за EU AI Act чл. 50 се пишеше само в v5 — v3 (веригата по
+    подразбиране) нямаше НИКАКВА следа от нея в meta.json (виж runner.py::_ai_act_meta).
+    """
+    post_dir = tmp_path / "post"
+    _write_briefing(post_dir)
+    client = make_client(writer=["Пост."], critic=[CLEAN_CRITIQUE, CLEAN_CRITIQUE], consolidator=["Пост."])
+
+    run_pipeline(post_dir, client, knowledge=make_brand_knowledge())
+    meta = json.loads((post_dir / "output" / "meta.json").read_text(encoding="utf-8"))
+
+    assert "ai_act" in meta
+    assert "чл. 50" in meta["ai_act"]["note"]
+
+
 # --------------------------------------------------------------- нищо не отхвърля поста
 
 def test_forbidden_violation_no_longer_stops_the_pipeline(tmp_path):
@@ -203,9 +242,10 @@ def test_problem_surviving_into_the_proposal_becomes_an_open_note(tmp_path):
     )
 
     result = run_pipeline(post_dir, client, knowledge=make_brand_knowledge())
+    meta = _wait_for_async_final_check(post_dir)
 
-    assert result.status == "ready_with_notes"
-    assert any("клише" in note for note in result.open_notes)
+    assert meta["status"] == "ready_with_notes"
+    assert any("клише" in note for note in meta["open_notes"])
     assert (post_dir / "output" / "post.md").read_text(encoding="utf-8").strip() == "Предложение, което още куца."
 
 def test_gdpr_finding_is_an_agenda_item_and_then_an_open_note(tmp_path):
@@ -225,10 +265,11 @@ def test_gdpr_finding_is_an_agenda_item_and_then_an_open_note(tmp_path):
     )
 
     result = run_pipeline(post_dir, client, knowledge=make_brand_knowledge())
+    meta = _wait_for_async_final_check(post_dir)
 
     assert "GDPR" in client.prompts[Role.WRITER][1]
-    assert any("организация без потвърдено съгласие" in note for note in result.open_notes)
-    assert result.status == "ready_with_notes"
+    assert any("организация без потвърдено съгласие" in note for note in meta["open_notes"])
+    assert meta["status"] == "ready_with_notes"
 
 def test_no_critique_verdict_raises(tmp_path):
     """Регресионна ограда: нито една от трите присъди не бива да хвърля изключение."""
@@ -297,9 +338,12 @@ def test_broken_final_check_does_not_lose_the_proposal(tmp_path):
     )
 
     result = run_pipeline(post_dir, client, knowledge=make_brand_knowledge())
+    _wait_for_async_final_check(post_dir)
 
+    # Асинхронна грешка (виж _start_async_final_check) не стига до result.open_notes —
+    # само self-contained лог в run.log на фоновия thread; предложението пак оцелява.
     assert (post_dir / "output" / "post.md").read_text(encoding="utf-8").strip() == "Предложение."
-    assert any("Финалната проверка не успя" in note for note in result.open_notes)
+    assert "Финалната проверка (async) се счупи" in (post_dir / "run.log").read_text(encoding="utf-8")
 
 # --------------------------------------------------------------- механични правила
 
