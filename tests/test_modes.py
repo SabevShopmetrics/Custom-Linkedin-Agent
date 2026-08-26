@@ -39,3 +39,28 @@ def test_resolve_mode_rejects_unknown_text():
 def test_get_mode_falls_back_to_default_for_unknown_key():
     assert modes.get_mode("не-съществува") == modes.get_mode(modes.DEFAULT_MODE)
     assert modes.get_mode(None) == modes.get_mode(modes.DEFAULT_MODE)
+
+
+def test_resolve_mode_for_revision_steps_down_on_shorter_request():
+    """
+    Регресионен тест за реален случай от живо тестване (2026-08-26): "Панорама" активна,
+    /revise поиска "по-кратко и с по-малко патос" — резултатът стана 574 думи вместо
+    по-малко, защото режимът налагаше 400+ и Post II го надуваше обратно. Инструкцията
+    трябва да печели — едно стъпало надолу, не директно до "Кадър".
+    """
+    assert modes.resolve_mode_for_revision("panorama", "да звучи по-кратко и с по-малко патос") == "fokus"
+
+
+def test_resolve_mode_for_revision_steps_up_on_longer_request():
+    assert modes.resolve_mode_for_revision("fokus", "разгърни повече, добави детайли") == "panorama"
+
+
+def test_resolve_mode_for_revision_ignores_instructions_without_a_length_signal():
+    """Не всяка ревизия е за дължината — "по-топло" не бива да пипа sticky режима."""
+    assert modes.resolve_mode_for_revision("panorama", "звучи по-топло и лично") == "panorama"
+    assert modes.resolve_mode_for_revision("kadar", "добави повече емоджита") == "kadar"
+
+
+def test_resolve_mode_for_revision_does_not_overshoot_past_the_scale_ends():
+    assert modes.resolve_mode_for_revision("kadar", "по-кратко") == "kadar"  # вече най-краткото
+    assert modes.resolve_mode_for_revision("panorama", "по-дълго") == "panorama"  # вече най-дългото

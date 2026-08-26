@@ -120,3 +120,29 @@ def test_draft_prompt_demands_a_fact_per_sentence():
 
     assert "Плътност" in DRAFT_SYSTEM_PROMPT_TEMPLATE
     assert "ключови етапи" in DRAFT_SYSTEM_PROMPT_TEMPLATE  # наблюдаваният празен израз
+
+
+def test_draft_prompt_forbids_fabricated_current_status_around_evergreen_programs():
+    """
+    Регресионен пазач за реален случай, докладван от потребителя (2026-08-26): по тънък
+    бриф Писателят описа и четирите утвърдени програми на клъстера (Фонд, CONNEXUS,
+    ТЕХНОСТАРТ, „Сверяване на часовника") като „в момента тече подготовка" — статус, който
+    не идва от никой източник (facts.yaml няма дати за нито една). Не можем детерминирано
+    да гарантираме, че LLM ще се подчини, но можем да пазим самата инструкция от изчезване.
+    """
+    from src.pipeline.writer import DRAFT_SYSTEM_PROMPT_TEMPLATE
+
+    assert "текущ статус" in DRAFT_SYSTEM_PROMPT_TEMPLATE.lower()
+    assert "в момента тече подготовка" in DRAFT_SYSTEM_PROMPT_TEMPLATE
+
+
+def test_draft_prompt_forbids_fabricated_details_attached_to_real_names():
+    """
+    Регресионен пазач за реален случай, докладван от потребителя (2026-08-26): текст
+    правилно спомена реално училище от корпуса, но добави измислен град ("Кюстендил"),
+    никъде непотвърден. Реално име ≠ разрешение да се добави каквато и да е подробност
+    около него.
+    """
+    from src.pipeline.writer import DRAFT_SYSTEM_PROMPT_TEMPLATE
+
+    assert "Кюстендил" in DRAFT_SYSTEM_PROMPT_TEMPLATE

@@ -193,6 +193,39 @@ def test_revise_appends_to_same_briefing_and_forces_rerun(tmp_path):
     assert "Бележка за ревизия 1" in briefing
     assert "по-кратко, без клишета" in briefing
 
+def test_revise_instruction_overrides_sticky_mode_for_that_run_only(tmp_path):
+    """
+    Регресионен тест за реален случай от живо тестване (2026-08-26): "Панорама" активна,
+    /revise поиска "по-кратко" — трябва да генерира с по-къс ефективен режим ЗА ТАЗИ
+    ревизия, докато sticky режимът на сесията остава "Панорама" за следващия НОВ пост.
+    """
+    pipeline = FakePipeline()
+    repl, output = make_repl(
+        tmp_path,
+        pipeline,
+        ["/mode панорама", "Годишнина на клъстера", "/revise да звучи по-кратко", "Нов повод"],
+    )
+
+    repl.run()
+
+    assert len(pipeline.calls) == 3
+    assert pipeline.calls[0]["mode"] == "panorama"  # първият пост — sticky режимът
+    assert pipeline.calls[1]["mode"] == "fokus"  # ревизията — едно стъпало надолу, само тук
+    assert pipeline.calls[2]["mode"] == "panorama"  # следващият НОВ пост — sticky остава непипнат
+    assert any("Фокус само за тази ревизия" in line for line in output)
+
+
+def test_revise_instruction_without_length_signal_keeps_sticky_mode(tmp_path):
+    pipeline = FakePipeline()
+    repl, _ = make_repl(
+        tmp_path, pipeline, ["/mode панорама", "Годишнина на клъстера", "/revise звучи по-топло"]
+    )
+
+    repl.run()
+
+    assert pipeline.calls[1]["mode"] == "panorama"  # без сигнал за дължина — режимът не се пипа
+
+
 def test_revise_without_post_does_not_call_pipeline(tmp_path):
     pipeline = FakePipeline()
     repl, output = make_repl(tmp_path, pipeline, ["/revise нещо"])

@@ -287,6 +287,41 @@ def _strip_meta_disclaimers(text: str, notes: list[str]) -> str:
 _LEVA_RE = re.compile(r"\bлв\.?\b|\bлева\b", re.IGNORECASE)
 _LEVA_AMOUNT_RE = re.compile(r"[\d][\d\s.,]*\s*(?:лв\.?|лева)", re.IGNORECASE)
 
+# Максимален брой дни по месец — консервативно за февруари (29, без изчисление на високосна
+# година; целта е да хване очевидно невъзможни дати като "30 февруари", не да съди гранични
+# случаи). Виж _flag_impossible_dates() защо съществува тази проверка.
+_MAX_DAYS_BY_MONTH = {
+    "януари": 31, "февруари": 29, "март": 31, "април": 30, "май": 31, "юни": 30,
+    "юли": 31, "август": 31, "септември": 30, "октомври": 31, "ноември": 30, "декември": 31,
+}
+_DATE_RE = re.compile(r"\b(\d{1,2})\s+(" + "|".join(MONTHS) + r")\b", re.IGNORECASE)
+
+
+def _flag_impossible_dates(text: str, notes: list[str]) -> None:
+    """
+    Флагва календарно невъзможна дата (напр. "30 февруари") — не я пипа, само предупреждава,
+    същия модел като _flag_leva_currency.
+
+    Реален пропуск, хванат при живо тестване (2026-08-26): бриф с невъзможна дата и невярна
+    годишнина ("30 февруари... 200-годишнина" за организация, основана 2008 г.). Планерът
+    правилно разпозна грешката в бележката си, но Писателят я написа въпреки това — и
+    Критикът никога не я хвана, защото проверката му за факти е "проследимо ли е до брифа",
+    не "вярно ли е като календар/аритметика", а датата формално ИДВАШЕ от брифа (потребителят
+    я е написал грешно). "Готовият" пост излезе с невъзможна дата, без нито едно предупреждение
+    към човека. Тази проверка е механичен, надежден бекъп — не заменя виж critic.py
+    (_render_planner_notes_block), който сега подава бележката на Планера директно на Критика
+    за по-общия клас "брифът съдържа факт, който противоречи сам на себе си".
+    """
+    for match in _DATE_RE.finditer(text):
+        day = int(match.group(1))
+        month = match.group(2).lower()
+        max_day = _MAX_DAYS_BY_MONTH.get(month)
+        if max_day is not None and day > max_day:
+            notes.append(
+                f"Датата \"{match.group(0)}\" е календарно невъзможна ({month} има най-много "
+                f"{max_day} дни) — проверете и коригирайте преди публикуване."
+            )
+
 
 def _flag_leva_currency(text: str, notes: list[str]) -> None:
     """
@@ -356,5 +391,6 @@ def enforce(text: str, rules: FormatRules, *, brief_text: str = "") -> Formattin
         )
 
     _flag_leva_currency(working, notes)
+    _flag_impossible_dates(working, notes)
 
     return FormattingResult(text=working, fixes=fixes, notes=notes, unenforceable=list(rules.unparsed))

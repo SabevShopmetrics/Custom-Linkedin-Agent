@@ -191,6 +191,26 @@ def test_no_leva_note_when_currency_not_mentioned():
     assert not any("лева" in note for note in result.notes)
 
 
+def test_impossible_date_is_flagged_but_left_untouched():
+    """
+    Регресионен тест за реален случай от живо тестване (2026-08-26): бриф с "30 февруари"
+    премина неусетно през целия конвейер и излезе в "готовия" пост без предупреждение.
+    Текстът не се пипа (не сме сигурни каква е правилната дата) — само бележка.
+    """
+    result = enforce(
+        "На 30 февруари отбелязахме 200-годишнината на организацията.",
+        sample_rules(),
+    )
+
+    assert "30 февруари" in result.text  # текстът НЕ се пипа
+    assert any("30 февруари" in note and "невъзможна" in note for note in result.notes)
+
+
+def test_valid_dates_are_not_flagged():
+    result = enforce("На 29 август ще отбележим годишнината.", sample_rules())
+    assert not any("невъзможна" in note for note in result.notes)
+
+
 def test_known_and_briefed_urls_survive():
     rules = sample_rules()
     text = (

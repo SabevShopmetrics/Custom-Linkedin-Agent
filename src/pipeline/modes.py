@@ -103,3 +103,41 @@ def mode_list_text() -> str:
         span = f"{m.words_min}-{m.words_max} думи" if m.words_min else "по преценка на корпуса"
         parts.append(f"{m.label} ({span})")
     return " · ".join(parts)
+
+
+# Скàла Кадър → Фокус → Панорама, най-къс до най-дълъг — виж resolve_mode_for_revision().
+_SCALE = ("kadar", "fokus", "panorama")
+
+_SHORTER_SIGNALS = (
+    "по-кратко", "накратко", "съкрати", "по-сбито", "по-стегнато", "стегни", "скъси", "съкратен",
+)
+_LONGER_SIGNALS = (
+    "по-дълго", "разгърни", "разшир", "удължи", "по-подробно", "надълго", "по-разгърнат",
+)
+
+
+def resolve_mode_for_revision(current_mode: str, instruction: str) -> str:
+    """
+    /revise инструкция печели над sticky режима на сесията, когато пряко му противоречи —
+    потребителска инструкция 2026-08-26, след живо тестване, което хвана точно обратния
+    случай: "Панорама" (400+ думи) активна, човек моли /revise "да звучи по-кратко", а
+    режимът налагаше долна граница, Критикът маркираше всеки по-кратък опит hard_reject
+    заради дължина и Post II го НАДУВАШЕ обратно — точно противоположно на молбата.
+
+    Само ЕДНО стъпало по скàлата Кадър↔Фокус↔Панорама, не директно до крайност —
+    инструкцията каза "по-кратко", не непременно "най-краткото възможно". Ако инструкцията
+    не съдържа ясен сигнал за дължина (напр. "звучи по-топло"), режимът остава непроменен —
+    не всяка ревизия е за дължината. Връща само ефективния режим ЗА ТАЗИ ревизия; sticky
+    режима на сесията (self.state.mode в repl.py) не се пипа тук — той е грижа на извикващия.
+    """
+    lowered = instruction.lower()
+    try:
+        index = _SCALE.index(current_mode)
+    except ValueError:
+        index = _SCALE.index(DEFAULT_MODE)
+
+    if any(signal in lowered for signal in _SHORTER_SIGNALS) and index > 0:
+        return _SCALE[index - 1]
+    if any(signal in lowered for signal in _LONGER_SIGNALS) and index < len(_SCALE) - 1:
+        return _SCALE[index + 1]
+    return current_mode

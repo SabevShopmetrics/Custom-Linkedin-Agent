@@ -752,6 +752,14 @@ class Repl:
         и конвейерът се пуска с force. Така цялата история — оригинален бриф, всяка
         добавена бележка, всеки междинен вариант — остава в една папка, четима отгоре
         надолу. Force е задължителен: брифът се е променил, значи и планът трябва.
+
+        Инструкцията на /revise печели над sticky режима на сесията, когато пряко му
+        противоречи (напр. "по-кратко" докато "Панорама" е активна) — потребителска
+        инструкция 2026-08-26, след живо тестване хвана точно обратния резултат: режимът
+        налагаше долна граница от думи, Критикът маркираше по-краткия опит hard_reject, и
+        Post II го НАДУВАШЕ обратно, противоположно на молбата. Виж
+        modes.resolve_mode_for_revision — само ЗА ТАЗИ ревизия; self.state.mode (sticky,
+        важи за следващия НОВ пост) не се пипа тук.
         """
         if not argument:
             self.out(self.ink.err("Употреба: /revise <какво да се промени>"))
@@ -766,7 +774,13 @@ class Repl:
         addition = f"\n\n## Бележка за ревизия {self.state.revisions}\n\n{argument.strip()}\n"
         briefing_path.write_text(existing.rstrip() + addition, encoding="utf-8")
         self.state.brief = briefing_path.read_text(encoding="utf-8")
-        self._generate(self.state.post_dir, force=True)
+
+        revision_mode = modes.resolve_mode_for_revision(self.state.mode, argument)
+        if revision_mode != self.state.mode:
+            label = modes.get_mode(revision_mode).label
+            self.out(self.ink.dim(f"  ({label} само за тази ревизия — sticky режимът остава непроменен)"))
+
+        self._generate(self.state.post_dir, force=True, mode_override=revision_mode)
 
     # ------------------------------------------------------------------ генериране
 
@@ -915,9 +929,15 @@ class Repl:
             raise box["error"]  # type: ignore[misc]
         return box["result"]  # type: ignore[return-value]
 
-    def _generate(self, post_dir: Path, *, force: bool) -> None:
-        """Пуска конвейера върху `post_dir` и отпечатва резултата/грешката. Общ път за нов пост, /again, /revise."""
+    def _generate(self, post_dir: Path, *, force: bool, mode_override: str | None = None) -> None:
+        """
+        Пуска конвейера върху `post_dir` и отпечатва резултата/грешката. Общ път за нов пост,
+        /again, /revise. `mode_override` — само от /revise, когато инструкцията пряко
+        противоречи на sticky режима (виж cmd_revise); None означава "ползвай sticky режима
+        на сесията", както преди.
+        """
         assert self.config is not None
+        effective_mode = mode_override or self.state.mode
         # Нов клиент на всяко пускане — виж докстринга на модула защо (call_log в meta.json).
         client = self.client_factory(self.config)
         started = time.monotonic()
@@ -925,7 +945,7 @@ class Repl:
         try:
             result = self._run_with_spinner(
                 lambda: self.pipeline_fn(
-                    post_dir, client, force=force, knowledge=self.knowledge, mode=self.state.mode
+                    post_dir, client, force=force, knowledge=self.knowledge, mode=effective_mode
                 )
             )
         except AgentError as exc:
@@ -967,7 +987,7 @@ class Repl:
         merged = " + ".join(result.merged_from) or "?"
         status = self.ink.ok("✓ предложение") if result.status == "ready" else self.ink.warn("⚠ предложение с бележки")
         calls = len(client.call_log)
-        mode_label = modes.get_mode(self.state.mode).label
+        mode_label = modes.get_mode(effective_mode).label
         self.out(
             f"  {status} "
             f"{self.ink.dim(f'· {mode_label} · от {merged} · {len(text.split())} думи · {calls} извиквания · {elapsed:.0f}s')}"
