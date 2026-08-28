@@ -286,6 +286,180 @@ def test_enforce_code_level_rules_preserves_llm_reported_violation():
     assert len(critique.rule_violations) == 1
 
 
+def test_enforce_code_level_rules_flags_unknown_latin_organization_outside_briefing():
+    """
+    Проверка 3 (виж research-plan-18-critique-of-plan-17.md, А1): организация, спомената в
+    текста, извън и members.yaml, и брифа — реален пример от живото adversarial тестване
+    (План 17, А1), който преди мина изцяло без предупреждение.
+    """
+    critique = CritiqueSchema(verdict=Verdict.OK, facts=[], tone_issues=[], rule_violations=[], summary="")
+
+    critic.enforce_code_level_rules(
+        critique, "Партньор на събитието бе Marina Tech Solutions.", "бриф без този партньор", []
+    )
+
+    assert critique.verdict == Verdict.OK  # GDPR e предупреждение, не hard_reject
+    assert any("Marina Tech Solutions" in v.detail for v in critique.rule_violations)
+
+
+def test_enforce_code_level_rules_flags_unknown_organization_with_legal_suffix():
+    """Вторият реален пример от План 17, А1 — латиница + правна форма."""
+    critique = CritiqueSchema(verdict=Verdict.OK, facts=[], tone_issues=[], rule_violations=[], summary="")
+
+    critic.enforce_code_level_rules(
+        critique, "Благодарим на Neurolink Systems GmbH за подкрепата.", "бриф без този партньор", []
+    )
+
+    assert any("Neurolink Systems GmbH" in v.detail for v in critique.rule_violations)
+    # _LATIN_ORG_PATTERN и _ORG_SUFFIX_PATTERN и двата биха хванали този низ — без дедупликация
+    # излиза дублирана находка за едно и също нещо.
+    assert len(critique.rule_violations) == 1
+
+
+def test_enforce_code_level_rules_does_not_double_flag_known_member_as_unknown_org():
+    """Проверка 3 не бива да дублира Проверка 1 за организация, вече позната от members.yaml."""
+    critique = CritiqueSchema(verdict=Verdict.OK, facts=[], tone_issues=[], rule_violations=[], summary="")
+    members = [{"name": "Marina Tech Solutions", "mention_allowed": True}]
+
+    critic.enforce_code_level_rules(
+        critique, "Партньор на събитието бе Marina Tech Solutions.", "бриф без този партньор", members
+    )
+
+    assert critique.rule_violations == []
+
+
+def test_enforce_code_level_rules_flags_unknown_organization_even_when_it_is_in_the_briefing():
+    """
+    Регресионен тест за реален бъг, хванат при живо тестване на 2026-08-27 (виж
+    research-plan-23-live-testing-of-phase1-fixes.md): по-ранна версия на Проверка 3
+    изключваше кандидат, дословно присъстващ в брифа — огледално на Проверка 2 за лични
+    имена. Но и двата реални примера от План 17, мотивирали Проверка 3 (Marina Tech
+    Solutions, Neurolink Systems GmbH), идваха ДИРЕКТНО от брифа — това изключение мълчаливо
+    пропускаше точно случая, заради който изобщо съществува проверката. Организация, за
+    която трябва да се провери СЪГЛАСИЕ, не се освобождава от проверка само защото човек я е
+    написал в брифа (за разлика от лично име, виж бележката в кода).
+    """
+    critique = CritiqueSchema(verdict=Verdict.OK, facts=[], tone_issues=[], rule_violations=[], summary="")
+
+    critic.enforce_code_level_rules(
+        critique,
+        "Партньор на събитието бе Marina Tech Solutions.",
+        "Партньор ще бъде Marina Tech Solutions.",
+        [],
+    )
+
+    assert any("Marina Tech Solutions" in v.detail for v in critique.rule_violations)
+
+
+def test_enforce_code_level_rules_does_not_flag_pure_cyrillic_region_name_as_organization():
+    """
+    Регресионна ограда, огледална на реален фалшив положителен на Проверка 2 (открит при
+    grep на историческия posts/ архив, План 18): "Северноизточна България" (регион, не
+    организация) падна в двукирилски-думи модела. Проверка 3 нарочно НЕ ползва същия модел
+    за чисто кирилски низове без правна форма — виж бележката над _LATIN_ORG_PATTERN.
+
+    Проверка 2 (лични имена, непроменена от тази промяна) си остава отделен, вече известен
+    риск за точно този тип низ — тестът тук изолира само Проверка 3, не твърди, че Проверка 2
+    е перфектна.
+    """
+    critique = CritiqueSchema(verdict=Verdict.OK, facts=[], tone_issues=[], rule_violations=[], summary="")
+
+    critic.enforce_code_level_rules(critique, "Работим активно в Централна България.", "бриф", [])
+
+    assert not any("непозната организация" in v.detail for v in critique.rule_violations)
+
+
+def test_enforce_code_level_rules_does_not_suppress_unrelated_org_sharing_words_with_a_member():
+    """
+    Регресионен тест за риск, открит при преглед на собствения фикс за А-1 (виж
+    research-plan-19-critique-of-phase1-implementation.md, Част А след А-1): по-ранна версия
+    на изключващата проверка ползваше "candidate е подниза на познато име", което би потиснало
+    различна, реално непозната организация само защото споделя дума с познат член.
+    """
+    critique = CritiqueSchema(verdict=Verdict.OK, facts=[], tone_issues=[], rule_violations=[], summary="")
+    members = [{"name": "Marina Tech Solutions", "mention_allowed": True}]
+
+    # "Tech Solutions" е ПОДНИЗА на познатия член "Marina Tech Solutions" — точно случаят,
+    # в който подниза-базирана изключваща проверка би замълчала фалшиво.
+    critic.enforce_code_level_rules(
+        critique,
+        "Partner of the event was Tech Solutions.",
+        "бриф без този партньор",
+        members,
+    )
+
+    assert any("Tech Solutions" in v.detail for v in critique.rule_violations)
+
+
+def test_enforce_code_level_rules_does_not_flag_own_organization_english_name():
+    """
+    Регресионен тест за реален пропуск в самата Фаза 1 (виж research-plan-19-critique-of-
+    phase1-implementation.md, А-1): facts.yaml пази name_en="ICT Cluster - Varna" — Проверка 3
+    иначе би флагнала собственото име на клъстера на латиница ("ICT Cluster", преди тирето)
+    като "непозната организация", ако own_org_names не се подаде/провери.
+    """
+    critique = CritiqueSchema(verdict=Verdict.OK, facts=[], tone_issues=[], rule_violations=[], summary="")
+
+    critic.enforce_code_level_rules(
+        critique,
+        "The workshop was organized by ICT Cluster - Varna for local students.",
+        "бриф без английско име",
+        [],
+        ["Сдружение „ИКТ-Клъстер-Варна\"", "ICT Cluster - Varna"],
+    )
+
+    assert not any("непозната организация" in v.detail for v in critique.rule_violations)
+
+
+def test_enforce_code_level_rules_still_flags_unrelated_latin_org_when_own_name_given():
+    """own_org_names не бива да потиска други, реално непознати организации — само своите."""
+    critique = CritiqueSchema(verdict=Verdict.OK, facts=[], tone_issues=[], rule_violations=[], summary="")
+
+    critic.enforce_code_level_rules(
+        critique,
+        "Partner of the event was Marina Tech Solutions.",
+        "бриф без този партньор",
+        [],
+        ["ICT Cluster - Varna"],
+    )
+
+    assert any("Marina Tech Solutions" in v.detail for v in critique.rule_violations)
+
+
+def test_critic_run_wires_facts_yaml_organization_name_into_own_org_check(tmp_path):
+    """
+    Wiring-ниво на предишния тест: critic.run() трябва наистина да извади organization.name_en
+    от knowledge.facts и да го подаде на enforce_code_level_rules — не само функцията на голо
+    да поддържа параметъра.
+    """
+
+    class CapturingClient:
+        def complete(self, role, prompt, *, system=None, images=None, schema=None):
+            return CritiqueSchema(verdict=Verdict.OK, facts=[], tone_issues=[], rule_violations=[], summary="")
+
+    post_dir = tmp_path / "post"
+    post_dir.mkdir()
+    plan = PlanSchema(
+        post_type="x", format="y", tone="z", needs_photos=False, max_photo_count=0, is_sensitive=False
+    )
+    knowledge = make_brand_knowledge(
+        facts={"organization": {"name_bg": "Сдружение „ИКТ-Клъстер-Варна\"", "name_en": "ICT Cluster - Varna"}},
+        facts_available=True,
+    )
+
+    critique = critic.run(
+        post_dir,
+        CapturingClient(),
+        knowledge,
+        plan,
+        "бриф",
+        "The event was organized by ICT Cluster - Varna.",
+        force=False,
+    )
+
+    assert not any("непозната организация" in v.detail for v in critique.rule_violations)
+
+
 def test_run_pipeline_raises_briefing_missing_before_touching_the_model(tmp_path):
     post_dir = tmp_path / "post"
     post_dir.mkdir()  # няма briefing.md изобщо

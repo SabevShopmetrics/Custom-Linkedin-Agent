@@ -65,6 +65,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from src.brand.loader import BrandKnowledge, load_brand_knowledge
 from src.errors import AgentError, BriefingMissingError, BriefingNotFilledError
@@ -256,30 +257,42 @@ def _run_pipeline_v3(
         for item in media_selection.selected:
             log.info("[2]/[3] снимка: %s — %s", item.filename, item.reason)
 
-        # [4] Критик върху Post I — намира какво да запълни вторият пост
-        log.info("[4] Критик върху Post I...")
-        critique = critic.run(post_dir, client, knowledge, plan, briefing_text, post_i_text, force=force)
-        findings = critic.collect_findings(critique)
+        # [4] Критик върху Post I — намира какво да запълни вторият пост. Пропуска се
+        # изцяло, когато Планерът е маркирал брифа като лишен от реално съдържание (виж
+        # research-plan-18-critique-of-plan-17.md, А2/B4): живото тестване от План 17
+        # показа, че иначе Критикът третира честния отказ на Писателя ("Брифът за
+        # събитието не е предоставен") като стилов проблем и принуждава Post II да го
+        # запълни с изцяло измислен текст. Без Критик няма находки → стъпка [5] отдолу се
+        # пропуска автоматично (findings == []) → стъпка [6] минава по съществуващия
+        # "само механично чистене" път (second_post=None), който изрично не добавя ново
+        # съдържание — честният отказ на Писателя остава непроменен.
+        findings: list[str] = []
+        if plan.insufficient_brief:
+            log.info("[4]-[6] Пропуснати — брифът е маркиран от Планера като недостатъчен.")
+        else:
+            log.info("[4] Критик върху Post I...")
+            critique = critic.run(post_dir, client, knowledge, plan, briefing_text, post_i_text, force=force)
+            findings = critic.collect_findings(critique)
 
-        # Дължината под минимума на корпуса (knowledge/voice/tone.md, изведена от 12
-        # реални поста на самата страница) досега стигаше до човек само като бележка на
-        # formatting.enforce() СЛЕД Консолидатора — твърде късно, за да я поправи Post II.
-        # Потребителска инструкция 2026-08-17: минимумът трябва реално да се приложи, не
-        # само да се отбележи. Код-ниво проверка тук (детерминирана, не LLM преценка),
-        # инжектирана директно в findings — същия модел като GDPR проверките на критика.
-        words_min = effective_rules.words_min
-        post_i_words = len(post_i_text.split())
-        if words_min is not None and post_i_words < words_min:
-            findings.append(
-                f"Дължина: постът е {post_i_words} думи, под минимума {words_min} от корпуса "
-                f"(knowledge/voice/tone.md) — добави още конкретни факти (число, детайл, "
-                f"резултат), не общи изречения, за да стигнеш поне {words_min} думи."
-            )
-            log.info("[4] находка (код): под минимума %d думи (Post I: %d)", words_min, post_i_words)
+            # Дължината под минимума на корпуса (knowledge/voice/tone.md, изведена от 12
+            # реални поста на самата страница) досега стигаше до човек само като бележка на
+            # formatting.enforce() СЛЕД Консолидатора — твърде късно, за да я поправи Post II.
+            # Потребителска инструкция 2026-08-17: минимумът трябва реално да се приложи, не
+            # само да се отбележи. Код-ниво проверка тук (детерминирана, не LLM преценка),
+            # инжектирана директно в findings — същия модел като GDPR проверките на критика.
+            words_min = effective_rules.words_min
+            post_i_words = len(post_i_text.split())
+            if words_min is not None and post_i_words < words_min:
+                findings.append(
+                    f"Дължина: постът е {post_i_words} думи, под минимума {words_min} от корпуса "
+                    f"(knowledge/voice/tone.md) — добави още конкретни факти (число, детайл, "
+                    f"резултат), не общи изречения, за да стигнеш поне {words_min} думи."
+                )
+                log.info("[4] находка (код): под минимума %d думи (Post I: %d)", words_min, post_i_words)
 
-        log.info("[4] присъда: %s · %d находки за запълване", critique.verdict.value, len(findings))
-        for finding in findings:
-            log.info("[4] находка: %s", finding)
+            log.info("[4] присъда: %s · %d находки за запълване", critique.verdict.value, len(findings))
+            for finding in findings:
+                log.info("[4] находка: %s", finding)
     except AgentError as exc:
         log.error("Спряно: %s", exc.human_message)
         if exc.detail:
@@ -375,6 +388,12 @@ def _run_pipeline_v3(
         warnings.append(warning_text)
         log.warning(warning_text)
 
+    if plan.insufficient_brief:
+        open_notes.append(
+            "Брифът изглежда без достатъчно съдържание за пост — Критик/Post II бяха "
+            "пропуснати автоматично; текстът по-долу е буквалната чернова на Писателя."
+        )
+
     status = "ready_with_notes" if (open_notes or warnings) else "ready"
     log.info("Финален статус: %s (%d открити въпроса, %d предупреждения)", status, len(open_notes), len(warnings))
     for note in open_notes:
@@ -392,7 +411,11 @@ def _run_pipeline_v3(
         merged_from=merged_from,
         applied_fixes=applied_fixes,
         resolution_summary=None,
-        extra_meta=_ai_act_meta(),
+        insufficient_brief=plan.insufficient_brief,
+        extra_meta={
+            **_ai_act_meta(),
+            "final_check": {"status": "skipped"} if plan.insufficient_brief else {"status": "pending"},
+        },
     )
 
     # [7] Критик върху предложението — АСИНХРОННО, огледално на v5's _start_async_final_check
@@ -402,8 +425,19 @@ def _run_pipeline_v3(
     # блокираше отговора на човека точно толкова дълго. Бележките и resolution_summary
     # (план 13) се дописват в meta.json, щом фоновата проверка приключи. Известно ограничение,
     # същото като в v5: TUI/REPL, вече показали резултата, не се обновяват визуално.
-    log.info("[7] Критик върху предложението (async, информативно)...")
-    _start_async_final_check(post_dir, client, knowledge, plan, briefing_text, official_text, findings=findings)
+    #
+    # Пропусната изцяло за insufficient_brief (виж research-plan-19-critique-of-phase1-
+    # implementation.md, А-2/А-3): (1) живият тест от План 17 вече показа нулева стойност
+    # на тази проверка точно върху кратък, честен отказ на Писателя; (2) B4 (repl.py) може
+    # автоматично да пусне ВТОРО генериране върху СЪЩАТА папка веднага след потребителски
+    # отговор — ако тази async проверка на ПЪРВОТО (изоставено) пускане все още тече, докато
+    # второто вече е записало нов meta.json, read-merge-write-ът ѝ презаписва бележки за
+    # текст, който вече не е на екрана.
+    if plan.insufficient_brief:
+        log.info("[7] Пропусната — брифът е маркиран от Планера като недостатъчен (виж [4]-[6]).")
+    else:
+        log.info("[7] Критик върху предложението (async, информативно)...")
+        _start_async_final_check(post_dir, client, knowledge, plan, briefing_text, official_text, findings=findings)
 
     return result
 
@@ -551,7 +585,7 @@ def _run_pipeline_v5(
         merged_from=merged_from,
         applied_fixes=applied_fixes,
         resolution_summary=None,
-        extra_meta=_ai_act_meta(),
+        extra_meta={**_ai_act_meta(), "final_check": {"status": "pending"}},
     )
 
     # [7] Финален критик — АСИНХРОННО (план 15, Част 4/1.1: тази стъпка сама изяжда ~70s в
@@ -609,9 +643,22 @@ def _start_async_final_check(
                 resolution_summary = _resolution_summary(len(findings), len(final_notes))
                 _append_run_log(log_path, f"[7] {resolution_summary}")
 
-            _merge_async_notes_into_meta(post_dir, final_notes, resolution_summary=resolution_summary)
+            _merge_async_notes_into_meta(
+                post_dir, final_notes, resolution_summary=resolution_summary, final_check={"status": "ok"}
+            )
         except AgentError as exc:
             _append_run_log(log_path, f"[7] Финалната проверка (async) се счупи: {exc.human_message}")
+            _merge_async_notes_into_meta(
+                post_dir, [], final_check={"status": "failed", "error": exc.human_message}
+            )
+        except Exception as exc:
+            # Живо тестване (план 17, А5) хвана AttributeError от развален JSON парсинг —
+            # преди тук минаваше суров traceback в конзолата на потребителя и стъпка [7]
+            # оставаше без никаква следа в meta.json. Резюме, не пълен traceback — виж
+            # докстринга на _append_run_log защо тук няма [ERROR] ниво.
+            error_summary = f"{type(exc).__name__}: {exc}"
+            _append_run_log(log_path, f"[7] Финалната проверка (async) се счупи неочаквано: {error_summary}")
+            _merge_async_notes_into_meta(post_dir, [], final_check={"status": "failed", "error": error_summary})
 
     thread = threading.Thread(target=_worker, daemon=True, name=f"final-check-{post_dir.name}")
     thread.start()
@@ -625,7 +672,11 @@ def _append_run_log(log_path: Path, message: str) -> None:
 
 
 def _merge_async_notes_into_meta(
-    post_dir: Path, final_notes: list[str], *, resolution_summary: str | None = None
+    post_dir: Path,
+    final_notes: list[str],
+    *,
+    resolution_summary: str | None = None,
+    final_check: dict[str, Any] | None = None,
 ) -> None:
     """
     Дописва находките от асинхронната проверка в output/meta.json СЛЕД като той вече е
@@ -637,9 +688,14 @@ def _merge_async_notes_into_meta(
 
     `resolution_summary` (само от v3, виж _start_async_final_check): записва се дори когато
     `final_notes` е празен списък — точно тогава е най-интересен ("напълно адресирани").
+
+    `final_check` (виж research-plan-18-critique-of-plan-17.md, А5): явен статус на стъпка
+    [7] — {"status": "ok"} или {"status": "failed", "error": "..."}. Записва се дори при
+    0 находки, за да различи "проверих, чисто е" от "не успях да проверя" (иначе двете
+    изглеждат еднакво отвън — липса на нова бележка).
     """
     meta_path = post_dir / "output" / "meta.json"
-    if not meta_path.exists() or (not final_notes and resolution_summary is None):
+    if not meta_path.exists() or (not final_notes and resolution_summary is None and final_check is None):
         return
     try:
         meta = read_json(meta_path)
@@ -651,4 +707,6 @@ def _merge_async_notes_into_meta(
             meta["status"] = "ready_with_notes"
     if resolution_summary is not None:
         meta["resolution_summary"] = resolution_summary
+    if final_check is not None:
+        meta["final_check"] = final_check
     write_json(meta_path, meta)

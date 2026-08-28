@@ -147,6 +147,18 @@ _JSON_BLOCK_RE = re.compile(r"```json\s*(\{.*?\})\s*```", re.DOTALL)
 # при реално end-to-end тестване на 2026-08-10 ("Клъстера" + "Благодарим" на нов ред).
 _NAME_PATTERN = re.compile(r"\b([А-ЯЁ][а-яё]+(?:-[А-ЯЁ][а-яё]+)?)[ \t]+([А-ЯЁ][а-яё]+(?:-[А-ЯЁ][а-яё]+)?)\b")
 
+# Проверка 3 (виж research-plan-18-critique-of-plan-17.md, А1): организация-подобен низ,
+# ограничена до по-сигурни сигнали — латиница или изрична правна форма. НЕ ползва
+# генеричния "две капитализирани кирилски думи" модел на _NAME_PATTERN по-горе за самата
+# организация: калибрация върху 150 реални поста показа реален фалшив положителен точно
+# на този модел ("Северноизточна България" — регион, не организация/лице), затова обхватът
+# в тази фаза е нарочно по-тесен, докато не се събере повече евиденция за чисто кирилски
+# организационни имена без правна форма.
+_LATIN_ORG_PATTERN = re.compile(r"\b([A-Z][a-zA-Z]+(?:[ \t]+[A-Z][a-zA-Z]+){1,3})\b")
+_ORG_SUFFIX_PATTERN = re.compile(
+    r"\b([А-ЯЁA-Z][\w-]*(?:[ \t]+[А-ЯЁA-Z][\w-]*){0,3}[ \t]+(?:ООД|ЕООД|АД|ЕАД|КД|СД|Ltd|GmbH|Inc|LLC|Corp)\.?)\b"
+)
+
 _PAREN_RE = re.compile(r"\(([^)]+)\)")
 # Немалко записи ползват кавички вместо скоби за псевдонима, напр.
 # ПГКМКС "Академик Благовест Сендов" — поддържа както права, така и българска отваряща.
@@ -221,6 +233,29 @@ def _member_name_variants(name: str) -> list[str]:
     return [v for v in variants if len(v) >= 3]  # твърде кратки низове дават фалшиви положителни
 
 
+_HYPHEN_SPLIT_RE = re.compile(r"\s+-\s+")
+
+
+def _own_org_name_variants(own_org_names: list[str] | None) -> list[str]:
+    """
+    Точни варианти на собственото име на организацията (виж enforce_code_level_rules,
+    Проверка 3) — за разлика от _member_name_variants(), НЕ прави подниза-съвпадение по
+    време на проверка (виж бележката там защо), само разбива facts.yaml's "ICT Cluster -
+    Varna" на думи-разделени-с-тире-и-интервали ПРЕДИ сравнението: ["ICT Cluster - Varna",
+    "ICT Cluster", "Varna"] — точни варианти в множеството, не гъвкав regex по време на
+    самата проверка.
+    """
+    variants: list[str] = []
+    for name in own_org_names or []:
+        if not name:
+            continue
+        variants.append(name)
+        parts = [p.strip() for p in _HYPHEN_SPLIT_RE.split(name) if p.strip()]
+        if len(parts) > 1:
+            variants.extend(parts)
+    return [v for v in variants if len(v) >= 3]
+
+
 def _render_planner_notes_block(plan: PlanSchema) -> str:
     """
     Бележката на Планера (`plan.notes`) — досега стигаше само до Писателя (writer.py), не и
@@ -281,7 +316,9 @@ def run(
 
     # Детерминираните GDPR проверки на код ниво идват СЛЕД LLM отговора и мутират
     # критиката — независимо какво е решил моделът (виж докстринга на функцията).
-    enforce_code_level_rules(critique, draft_text, briefing_text, knowledge.members)
+    organization = (knowledge.facts or {}).get("organization") or {}
+    own_org_names = [organization.get("name_bg") or "", organization.get("name_en") or ""]
+    enforce_code_level_rules(critique, draft_text, briefing_text, knowledge.members, own_org_names)
 
     write_text(critique_path, _render_critique_markdown(critique))
     return critique
@@ -316,6 +353,7 @@ def enforce_code_level_rules(
     draft_text: str,
     briefing_text: str,
     members: list[dict[str, Any]],
+    own_org_names: list[str] | None = None,
 ) -> None:
     """
     Прилага в кода двете GDPR проверки от раздел 6 на followup-prompt-2, независимо от
@@ -329,6 +367,12 @@ def enforce_code_level_rules(
     Забележка: проверката за "лично име извън брифа" е груба регулярна евристика
     (две последователни капитализирани кирилски думи), не истинска NER — целта е да
     хване очевидни случаи, не да замести човешка преценка.
+
+    `own_org_names` (виж research-plan-19-critique-of-phase1-implementation.md, А-1):
+    официалните имена на самата организация (facts.yaml — name_bg/name_en), изключени от
+    Проверка 3, за да не флагне собственото си име, когато е изписано на латиница (напр.
+    "ICT Cluster" от "ICT Cluster - Varna") — Проверка 3 иначе не знае нищо за собствената
+    самоличност на клъстера, само за трети страни (`members`).
     """
     violations = list(critique.rule_violations)
     lower_draft = draft_text.lower()
@@ -357,6 +401,63 @@ def enforce_code_level_rules(
         if candidate not in briefing_text:
             violations.append(
                 RuleViolation(rule="gdpr", detail=f"Възможно лично име извън брифа: '{candidate}'.")
+            )
+
+    # Проверка 3: организация-подобен низ (латиница или с правна форма — виж бележката над
+    # _LATIN_ORG_PATTERN за защо не и генерично кирилско), който не е нито познат член
+    # (Проверка 1 вече го покрива, независимо от mention_allowed), нито (виж own_org_names
+    # по-горе) самата организация.
+    #
+    # НАРОЧНО без изключение "candidate дословно в брифа" (за разлика от Проверка 2 за лични
+    # имена) — фикс, направен при живо тестване на 2026-08-27 (виж research-plan-23): и двата
+    # реални примера от План 17, които мотивираха тази проверка (Marina Tech Solutions,
+    # Neurolink Systems GmbH), идваха ДИРЕКТНО от брифа. По-ранна версия имаше точно това
+    # изключение (копирано по аналогия от Проверка 2) и мълчаливо пропускаше двата случая,
+    # заради които изобщо се пише тази проверка — потвърдено чрез реално пускане с брифа
+    # 'Благодарим на TechVenture GmbH...' Съгласие на трета страна за публично асоцииране с
+    # клъстера не се установява от факта, че човек е написал името ѝ в брифа (за разлика от
+    # лично име, при което операторът вероятно познава човека) — затова тук проверката е
+    # безусловна спрямо брифа, огледално на Проверка 1 (членове), не на Проверка 2 (имена).
+    #
+    # Точно равенство (не подниза) за ДВЕТЕ множества — известни членове И собствено име —
+    # нарочно: по-ранна версия правеше "candidate е подниза на познато име", за да покрие
+    # "ICT Cluster" срещу "ICT Cluster - Varna" (виж research-plan-19), но подниза-проверка
+    # срещу members би потискала различна, реално непозната организация, чието име случайно
+    # споделя дума с познат член (напр. непознатата "Tech Solutions" срещу познатия член
+    # "Marina Tech Solutions" — фалшиво отрицание на реален случай, не на собственото име).
+    # Затова "ICT Cluster - Varna" се разбива на думи/тирета в own_org_name_variants() ПРЕДИ
+    # сравнението — точни варианти в множеството, не гъвкаво съвпадение по време на проверка.
+    #
+    # Известен, ПРИЕТ остатъчен риск (виж research-plan-21-critique-of-round2-and-latin-
+    # branding-risk.md): Писателят понякога измисля английска под-марка за собствена програма
+    # на клъстера, извън и брифа, и facts.yaml буквално — реален пример от архива, "AI Edition"
+    # (за "ТЕХНОСТАРТ Weekend", facts.yaml описва само "AI хакатон", кирилица). own_org_names
+    # НЕ хваща това (низът не съществува никъде в корпуса за сравнение), а по-агресивна
+    # евристика (контекстова сигнална дума) риска да пропусне истински случаи (Marina Tech
+    # Solutions/Neurolink Systems GmbH от План 17 нямат гарантирана сигнална дума до себе си).
+    # Оставено нарочно непроменено — GDPR категорията е предупреждение, никога отказ (виж
+    # verdict логиката по-долу), цената на този клас фалшив положителен вече е приета за ниска,
+    # същия принцип, на който разчита Проверка 1/2 от самото начало.
+    known_org_variants = {
+        variant.lower() for member in members for variant in _member_name_variants(member.get("name") or "")
+    }
+    known_org_variants.update(v.lower() for v in _own_org_name_variants(own_org_names))
+    flagged_orgs: set[str] = set()
+    for pattern in (_LATIN_ORG_PATTERN, _ORG_SUFFIX_PATTERN):
+        for match in pattern.finditer(draft_text):
+            candidate = match.group(0)
+            key = candidate.lower()
+            if key in known_org_variants or key in flagged_orgs:
+                continue
+            flagged_orgs.add(key)
+            violations.append(
+                RuleViolation(
+                    rule="gdpr",
+                    detail=(
+                        f"Възможна непозната организация извън members.yaml: '{candidate}' — "
+                        f"провери съгласие за публично споменаване ръчно, преди публикуване."
+                    ),
+                )
             )
 
     critique.rule_violations = violations

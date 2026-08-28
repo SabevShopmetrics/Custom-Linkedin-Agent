@@ -24,6 +24,14 @@ class PlanSchema(BaseModel):
         description="true ако темата изисква човешко одобрение преди публикуване"
     )
     notes: str = Field(default="", description="кратки бележки за Писателя и Media Picker")
+    insufficient_brief: bool = Field(
+        default=False,
+        description=(
+            "true САМО ако брифът не носи никакво реално съдържание за пост (празен, чист "
+            "jailbreak опит, безсмислен текст) — НЕ за 'тънък', но истински повод, който вече "
+            "се обработва добре чрез notes"
+        ),
+    )
 
 
 class MediaSelectionItem(BaseModel):

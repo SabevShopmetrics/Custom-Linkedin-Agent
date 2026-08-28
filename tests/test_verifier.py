@@ -88,6 +88,25 @@ def test_gdpr_code_level_check_still_runs_on_candidates():
     assert not result.blocked  # GDPR сам по себе си не блокира — само "forbidden" го прави
 
 
+def test_gdpr_check_does_not_flag_own_organization_english_name():
+    """
+    Wiring-ниво за v5 (виж research-plan-19-critique-of-phase1-implementation.md, А-1/А-4):
+    check_candidate() трябва да подаде organization.name_en от knowledge.facts на
+    enforce_code_level_rules, точно както critic.run() прави за v3 — иначе v5 наследява
+    същия фалшив положителен за собственото име на клъстера, който v3 вече поправи.
+    """
+    knowledge = make_brand_knowledge(
+        facts={"organization": {"name_bg": "Сдружение „ИКТ-Клъстер-Варна\"", "name_en": "ICT Cluster - Varna"}}
+    )
+    briefing_text = "Уъркшоп за ученици."
+    text = "The workshop was organized by ICT Cluster - Varna for local students."
+    result = verifier.check_candidate(
+        "post_1.md", text, briefing_text=briefing_text, pool=_pool(), knowledge=knowledge, client=_client()
+    )
+
+    assert not any("непозната организация" in v.detail for v in result.rule_violations)
+
+
 def test_forbidden_rule_violation_from_llm_blocks_the_candidate():
     """
     Затвореният пропуск: rules/forbidden.md нарушение вече идва от check_forbidden_rules

@@ -29,11 +29,19 @@ from tests.conftest import make_brand_knowledge, make_config
 class FakePipeline:
     """Записва извикванията и пише output/post.md, както прави истинският Консолидатор."""
 
-    def __init__(self, *, status: str = "ready", warnings: list[str] | None = None, raises: Exception | None = None):
+    def __init__(
+        self,
+        *,
+        status: str = "ready",
+        warnings: list[str] | None = None,
+        raises: Exception | None = None,
+        insufficient_brief: bool = False,
+    ):
         self.calls: list[dict] = []
         self.status = status
         self.warnings = warnings or []
         self.raises = raises
+        self.insufficient_brief = insufficient_brief
 
     def __call__(self, post_dir: Path, client, *, force: bool = False, knowledge=None, **kwargs) -> PipelineResult:
         self.calls.append({"post_dir": post_dir, "force": force, "knowledge": knowledge, "mode": kwargs.get("mode")})
@@ -48,6 +56,7 @@ class FakePipeline:
             post_path=output_dir / "post.md",
             meta_path=output_dir / "meta.json",
             warnings=self.warnings,
+            insufficient_brief=self.insufficient_brief,
         )
 
 class FakeClient:
@@ -254,6 +263,42 @@ def test_agent_error_is_shown_as_sentence_not_traceback(tmp_path):
     assert "Спряно:" in text
     assert "briefing.md" in text
     assert "Traceback" not in text
+
+def test_insufficient_brief_prompt_is_skipped_for_a_normal_result(tmp_path):
+    """
+    B4 (виж research-plan-18-critique-of-plan-17.md, А2) не се задейства без флага — нормален
+    резултат минава без допълнителен input_fn въпрос (иначе входният ред би се изчерпал по-рано
+    и repl.run() би паднал с EOFError извън контролирания край на сесията).
+    """
+    pipeline = FakePipeline()
+    repl, output = make_repl(tmp_path, pipeline, ["Нормален бриф за пост."])
+
+    assert repl.run() == 0
+
+    assert len(pipeline.calls) == 1
+
+def test_insufficient_brief_prompt_can_be_declined(tmp_path):
+    """Enter (празен отговор) приема готовото предложение без ново пускане."""
+    pipeline = FakePipeline(insufficient_brief=True)
+    repl, output = make_repl(tmp_path, pipeline, ["бриф без съдържание", ""])
+
+    assert repl.run() == 0
+
+    assert len(pipeline.calls) == 1
+
+def test_insufficient_brief_prompt_appends_detail_and_regenerates(tmp_path):
+    """Непразен отговор се добавя към briefing.md и пуска конвейера наново с force=True."""
+    pipeline = FakePipeline(insufficient_brief=True)
+    repl, output = make_repl(tmp_path, pipeline, ["бриф без съдържание", "детайл за поста", ""])
+
+    assert repl.run() == 0
+
+    assert len(pipeline.calls) == 2
+    assert pipeline.calls[0]["force"] is False
+    assert pipeline.calls[1]["force"] is True
+    assert pipeline.calls[1]["post_dir"] == pipeline.calls[0]["post_dir"]
+    briefing = (pipeline.calls[1]["post_dir"] / "briefing.md").read_text(encoding="utf-8")
+    assert "детайл за поста" in briefing
 
 def test_text_from_an_interrupted_run_is_still_shown(tmp_path):
     """

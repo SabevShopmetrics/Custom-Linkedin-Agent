@@ -113,8 +113,13 @@ def check_candidate(
     claims = [ClaimVerification(claim=claim, verified=_claim_is_covered(claim, allowed)) for claim in raw_claims]
 
     # Преизползва СЪЩАТА функция като v3's Критик, непроменена — виж докстринга на модула.
+    # own_org_names (виж research-plan-19-critique-of-phase1-implementation.md, А-1/А-4):
+    # v5 трябва да получи същото изключение за собственото име на организацията като v3,
+    # иначе наследява точно бъга, който там вече беше поправен.
+    organization = (knowledge.facts or {}).get("organization") or {}
+    own_org_names = [organization.get("name_bg") or "", organization.get("name_en") or ""]
     throwaway = CritiqueSchema(verdict=Verdict.OK)
-    critic.enforce_code_level_rules(throwaway, text, briefing_text, knowledge.members)
+    critic.enforce_code_level_rules(throwaway, text, briefing_text, knowledge.members, own_org_names)
 
     violations = list(throwaway.rule_violations)
     violations.extend(critic.check_forbidden_rules(client, knowledge, text))

@@ -345,6 +345,97 @@ def test_broken_final_check_does_not_lose_the_proposal(tmp_path):
     assert (post_dir / "output" / "post.md").read_text(encoding="utf-8").strip() == "Предложение."
     assert "Финалната проверка (async) се счупи" in (post_dir / "run.log").read_text(encoding="utf-8")
 
+def test_broken_final_check_with_non_agent_error_records_failed_status(tmp_path):
+    """
+    A5 (виж research-plan-18-critique-of-plan-17.md): преди тук минаваше суров traceback в
+    конзолата и стъпка [7] оставаше без никаква следа в meta.json — разликата между "проверих,
+    чисто е" и "не успях да проверя" изчезваше напълно. Сега широкият catch хваща и
+    не-AgentError изключения (напр. AttributeError от развален JSON парсинг) и записва явен
+    статус.
+    """
+    post_dir = tmp_path / "post"
+    _write_briefing(post_dir)
+    client = make_client(
+        writer=["Пост I.", "Пост II."],
+        critic=[tone_critique("клише"), AttributeError("'NoneType' object has no attribute 'strip'")],
+        consolidator=["Предложение."],
+    )
+
+    result = run_pipeline(post_dir, client, knowledge=make_brand_knowledge())
+    meta = _wait_for_async_final_check(post_dir)
+
+    assert (post_dir / "output" / "post.md").read_text(encoding="utf-8").strip() == "Предложение."
+    assert meta["final_check"]["status"] == "failed"
+    assert "AttributeError" in meta["final_check"]["error"]
+    assert "Traceback" not in (post_dir / "run.log").read_text(encoding="utf-8")
+
+def test_successful_final_check_records_ok_status(tmp_path):
+    post_dir = tmp_path / "post"
+    _write_briefing(post_dir)
+    client = make_client(writer=["Пост."], critic=[CLEAN_CRITIQUE, CLEAN_CRITIQUE], consolidator=["Пост."])
+
+    run_pipeline(post_dir, client, knowledge=make_brand_knowledge())
+    meta = _wait_for_async_final_check(post_dir)
+
+    assert meta["final_check"] == {"status": "ok"}
+
+# --------------------------------------------------------------- недостатъчен бриф (А2/B4)
+
+def test_insufficient_brief_skips_critic_and_second_post(tmp_path):
+    """
+    А2 (виж research-plan-18-critique-of-plan-17.md): когато Планерът маркира брифа като
+    недостатъчен, Критик/Post II/LLM-синтез в Консолидатора НЕ се извикват изобщо — нито
+    синхронно, нито асинхронно за стъпка [7] (виж research-plan-19-critique-of-phase1-
+    implementation.md, А-2/А-3: асинхронната проверка тук нямаше стойност в живия тест на
+    План 17 и създаваше риск от състезание с B4's автоматично регенериране). Критикът НЕ се
+    извиква изобщо — опашката му остава празна, за да гръмне ако това се промени случайно.
+    """
+    post_dir = tmp_path / "post"
+    _write_briefing(post_dir)
+    insufficient_plan = PlanSchema(
+        post_type="общо",
+        format="само текст",
+        tone="неутрален",
+        needs_photos=False,
+        max_photo_count=0,
+        is_sensitive=False,
+        insufficient_brief=True,
+    )
+    client = FakeSequencedClient(
+        {
+            Role.PLANNER: [insufficient_plan],
+            Role.WRITER: ["Брифът за събитието не е предоставен."],
+            Role.MEDIA: [MediaSelectionSchema(selected=[])],
+            Role.CRITIC: [],  # НЕ бива да се извика — нито синхронно, нито асинхронно
+            Role.CONSOLIDATOR: ["Брифът за събитието не е предоставен."],
+        }
+    )
+
+    result = run_pipeline(post_dir, client, knowledge=make_brand_knowledge())
+    meta = _wait_for_async_final_check(post_dir)
+
+    assert result.merged_from == ["post_i.md"]
+    assert result.insufficient_brief is True
+    assert any("без достатъчно съдържание" in note for note in result.open_notes)
+    assert not (post_dir / "post_ii.md").exists()
+    assert meta["final_check"] == {"status": "skipped"}
+    assert meta["insufficient_brief"] is True
+
+def test_sufficient_brief_is_unaffected_by_the_insufficient_brief_gate(tmp_path):
+    """Регресионна ограда: нормален бриф (insufficient_brief по подразбиране False) минава по стария път, непроменено."""
+    post_dir = tmp_path / "post"
+    _write_briefing(post_dir)
+    client = make_client(
+        writer=["Пост I с клише.", "Пост II без клише."],
+        critic=[tone_critique("изразът 'вълнуващо' е клише"), CLEAN_CRITIQUE],
+        consolidator=["Официално предложение."],
+    )
+
+    result = run_pipeline(post_dir, client, knowledge=make_brand_knowledge())
+
+    assert result.insufficient_brief is False
+    assert result.merged_from == ["post_i.md", "post_ii.md"]
+
 # --------------------------------------------------------------- механични правила
 
 def test_mechanical_rules_are_applied_to_the_proposal_before_it_is_written(tmp_path):

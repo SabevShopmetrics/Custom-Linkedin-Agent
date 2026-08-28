@@ -85,6 +85,7 @@ class PipelineResult:
     merged_from: list[str] = field(default_factory=list)
     applied_fixes: list[str] = field(default_factory=list)
     resolution_summary: str | None = None  # виж research-plan-13-critic-resolution-visibility.md
+    insufficient_brief: bool = False  # виж research-plan-18-critique-of-plan-17.md, А2/B4
 
 
 def synthesize(
@@ -167,6 +168,7 @@ def finalize(
     merged_from: list[str] | None = None,
     applied_fixes: list[str] | None = None,
     resolution_summary: str | None = None,
+    insufficient_brief: bool = False,
     extra_meta: dict[str, Any] | None = None,
 ) -> PipelineResult:
     """
@@ -204,6 +206,7 @@ def finalize(
         "merged_from": merged_from or [],
         "applied_fixes": applied_fixes or [],
         "resolution_summary": resolution_summary,
+        "insufficient_brief": insufficient_brief,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "plan": plan.model_dump(),
         "photos": {
@@ -227,4 +230,5 @@ def finalize(
         merged_from=merged_from or [],
         applied_fixes=applied_fixes or [],
         resolution_summary=resolution_summary,
+        insufficient_brief=insufficient_brief,
     )

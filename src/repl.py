@@ -1009,6 +1009,23 @@ class Repl:
 
         self.out(self.ink.dim("  /revise <инструкция> дошлайфа този пост · /preview за визуален изглед · нов ред = нов пост"))
 
+        # B4 (виж research-plan-18-critique-of-plan-17.md, А2): Планерът вече прецени, че
+        # брифът не носи никакво реално съдържание — постът по-горе е буквалната чернова на
+        # Писателя, не преминала през Критик/Post II. Пита директно, вместо тихо да остави
+        # изцяло общ текст да изглежда като напълно готово предложение.
+        if result.insufficient_brief:
+            answer = self.input_fn(
+                self.ink.accent(
+                    "  Брифът изглежда без достатъчно съдържание за пост — Enter продължава с "
+                    "това предложение, или напиши детайли сега, за да генерирам наново › "
+                )
+            ).strip()
+            if answer:
+                briefing_path = post_dir / "briefing.md"
+                existing = (read_text_or_none(briefing_path) or "").rstrip("\n")
+                briefing_path.write_text(f"{existing}\n{answer}\n", encoding="utf-8")
+                self._generate(post_dir, force=True, mode_override=mode_override)
+
     def cmd_preview(self, _argument: str = "") -> None:
         """
         Генерира и отваря output/preview.html (текст + избрани снимки, самостоятелен файл) —
