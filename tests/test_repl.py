@@ -14,6 +14,7 @@ from datetime import date
 from pathlib import Path
 
 from src.errors import BriefingMissingError, ModelUnavailableError
+from src.llm.schema import PlanSchema
 from src.pipeline.consolidator import PipelineResult
 from src.repl import (
     Ink,
@@ -60,14 +61,39 @@ class FakePipeline:
         )
 
 class FakeClient:
-    def __init__(self, config) -> None:
+    """
+    `plan_notes` подадено на конструктора се връща като `plan.notes` от `.complete()` —
+    ползва се за симулиране на "тънък бриф" в тестовете за `_thin_brief_precheck`
+    (research-plan-24-institution-gdpr-false-positive-and-word-floor.md, Вариант 2).
+    По подразбиране е празно (не съдържа "тънък"), затова за всеки тест, който не се
+    интересува от тази функционалност, precheck-ът минава транзитивно, без да пита нищо.
+    """
+
+    def __init__(self, config, *, plan_notes: str = "") -> None:
         self.config = config
         self.call_log: list = []
+        self.plan_notes = plan_notes
 
     def check_connection(self) -> dict:
         return {"planner": {"model": "planner-model", "ok": True, "duration_seconds": 0.1}}
 
-def make_repl(tmp_path: Path, pipeline: FakePipeline, lines: list[str]) -> tuple[Repl, list[str]]:
+    def complete(self, role, prompt, *, system=None, schema=None):
+        if schema is PlanSchema:
+            return PlanSchema(
+                post_type="test",
+                format="само текст",
+                tone="test",
+                needs_photos=False,
+                max_photo_count=0,
+                is_sensitive=False,
+                notes=self.plan_notes,
+                insufficient_brief=False,
+            )
+        raise NotImplementedError("FakeClient.complete поддържа само PlanSchema в тези тестове")
+
+def make_repl(
+    tmp_path: Path, pipeline: FakePipeline, lines: list[str], *, plan_notes: str = ""
+) -> tuple[Repl, list[str]]:
     output: list[str] = []
     inputs = iter(lines)
 
@@ -84,7 +110,7 @@ def make_repl(tmp_path: Path, pipeline: FakePipeline, lines: list[str]) -> tuple
         ink=Ink(enabled=False),
         config_loader=make_config,
         knowledge_loader=make_brand_knowledge,
-        client_factory=FakeClient,
+        client_factory=lambda config: FakeClient(config, plan_notes=plan_notes),
         pipeline_fn=pipeline,
         today=date(2026, 8, 11),
     )
@@ -823,3 +849,142 @@ def test_split_path_args_supports_quoted_paths_with_spaces():
     from src.repl import split_path_args
 
     assert split_path_args('"C:\снимки папка\a.jpg" b.jpg') == ["C:\снимки папка\a.jpg", "b.jpg"]
+
+
+# --------------------------------------------------------------------------- тънък бриф (План 24)
+
+
+def test_thin_brief_precheck_asks_nothing_when_planner_does_not_flag_it_as_thin(tmp_path):
+    """По подразбиране (plan_notes без "тънък") precheck-ът минава транзитивно, без въпрос."""
+    pipeline = FakePipeline()
+    repl, output = make_repl(tmp_path, pipeline, ["Обичаен бриф с достатъчно детайли."], plan_notes="")
+
+    repl.run()
+
+    assert pipeline.calls[0]["force"] is False
+    assert not any("тънък бриф" in line for line in output)
+
+
+def test_thin_brief_precheck_asks_a_question_when_planner_flags_it_as_thin(tmp_path):
+    """Ако Планерът пише "тънък" в notes, REPL-ът пита ЕДНО уточняващо въпросче преди да продължи."""
+    pipeline = FakePipeline()
+    asked: list[str] = []
+    inputs = iter(["Кратък бриф.", ""])
+
+    def input_fn(prompt: str) -> str:
+        asked.append(prompt)
+        try:
+            return next(inputs)
+        except StopIteration:
+            raise EOFError
+
+    repl = Repl(
+        posts_dir=tmp_path / "posts",
+        out=lambda line: None,
+        input_fn=input_fn,
+        ink=Ink(enabled=False),
+        config_loader=make_config,
+        knowledge_loader=make_brand_knowledge,
+        client_factory=lambda config: FakeClient(config, plan_notes="Брифът е тънък — липсват дата и конкретни детайли."),
+        pipeline_fn=pipeline,
+        today=date(2026, 8, 11),
+    )
+
+    repl.run()
+
+    assert any("тънък бриф" in prompt for prompt in asked)
+    # Enter (празен отговор) -> брифът остава непроменен, run_pipeline не се форсира.
+    assert pipeline.calls[0]["force"] is False
+    briefing = (pipeline.calls[0]["post_dir"] / "briefing.md").read_text(encoding="utf-8")
+    assert briefing.strip() == "Кратък бриф."
+
+
+def test_thin_brief_precheck_asks_nothing_when_planner_says_thin_but_adequate(tmp_path):
+    """
+    Регресионен тест за реален фалшив positive, открит при адверсариално живо тестване
+    (2026-08-31, виж research-plan-25): Планерът винаги пише "тънък" за цяла категория
+    брифове, включително такива с богата фактология, квалифицирайки ги с "но достатъчен/
+    съдържателен" (виж planner.py's системен промпт). Стар precheck питаше дори тогава.
+    """
+    pipeline = FakePipeline()
+    asked: list[str] = []
+    inputs = iter(["Богат бриф с много факти и числа."])
+
+    def input_fn(prompt: str) -> str:
+        asked.append(prompt)
+        try:
+            return next(inputs)
+        except StopIteration:
+            raise EOFError
+
+    repl = Repl(
+        posts_dir=tmp_path / "posts",
+        out=lambda line: None,
+        input_fn=input_fn,
+        ink=Ink(enabled=False),
+        config_loader=make_config,
+        knowledge_loader=make_brand_knowledge,
+        client_factory=lambda config: FakeClient(
+            config, plan_notes="Брифът е тънък, но съдържателен – съдържа 4 конкретни елемента."
+        ),
+        pipeline_fn=pipeline,
+        today=date(2026, 8, 11),
+    )
+
+    repl.run()
+
+    assert not any("тънък бриф" in prompt for prompt in asked)
+    assert pipeline.calls[0]["force"] is False
+
+
+def test_thin_brief_precheck_enriches_briefing_and_forces_rerun_when_answered(tmp_path):
+    """Отговор, различен от Enter, се добавя към брифа и force=True кара конвейера да преизчисли всичко."""
+    pipeline = FakePipeline()
+    repl, output = make_repl(
+        tmp_path,
+        pipeline,
+        ["Кратък бриф.", "Участваха 25 души на 14 март."],
+        plan_notes="Брифът е тънък — липсват дата и конкретни детайли.",
+    )
+
+    repl.run()
+
+    assert pipeline.calls[0]["force"] is True
+    post_dir = pipeline.calls[0]["post_dir"]
+    briefing = post_dir.joinpath("briefing.md").read_text(encoding="utf-8")
+    assert "Кратък бриф." in briefing
+    assert "Участваха 25 души на 14 март." in briefing
+    assert not (post_dir / "plan.json").exists()  # старият план (върху тънката версия) е изтрит
+
+
+def test_thin_brief_precheck_does_not_run_for_again_or_revise(tmp_path):
+    """/again и /revise минават направо през _generate — precheck-ът важи само за нов бриф."""
+    pipeline = FakePipeline()
+    asked: list[str] = []
+    inputs = iter(["Кратък бриф.", "", "/again"])
+
+    def input_fn(prompt: str) -> str:
+        asked.append(prompt)
+        try:
+            return next(inputs)
+        except StopIteration:
+            raise EOFError
+
+    repl = Repl(
+        posts_dir=tmp_path / "posts",
+        out=lambda line: None,
+        input_fn=input_fn,
+        ink=Ink(enabled=False),
+        config_loader=make_config,
+        knowledge_loader=make_brand_knowledge,
+        client_factory=lambda config: FakeClient(config, plan_notes="Брифът е тънък — липсват дата и конкретни детайли."),
+        pipeline_fn=pipeline,
+        today=date(2026, 8, 11),
+    )
+
+    repl.run()
+
+    # Едно "тънък бриф" питане общо (само за първоначалния бриф, не и за /again).
+    assert sum(1 for prompt in asked if "тънък бриф" in prompt) == 1
+    assert len(pipeline.calls) == 2
+    assert pipeline.calls[1]["force"] is True  # /again винаги force, независимо от precheck-а

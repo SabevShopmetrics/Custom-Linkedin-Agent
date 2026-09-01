@@ -88,7 +88,7 @@ from src.config import Config, ConfigError, load_config
 from src.errors import AgentError
 from src.llm.client import LLMClient
 from src.logging_utils import register_persistent_handler, unregister_persistent_handler
-from src.pipeline import modes
+from src.pipeline import modes, planner
 from src.pipeline.consolidator import PipelineResult
 from src.pipeline.preview import render_preview
 from src.pipeline.runner import run_pipeline
@@ -351,6 +351,11 @@ _SUPPRESSED_LOG_PREFIXES = (
 # (напр. отделна находка, вече отстъпена от runner.py) също се третира като детайл на
 # текущата отворена секция — идва хронологично веднага след нея.
 _STEP_TAG_RE = re.compile(r"^(\[[^\]]+\](?:/\[[^\]]+\])?)\s*")
+
+# "тънък, но достатъчен/съдържателен" и т.н. — Планерът винаги пише "тънък" за тази цяла
+# категория брифове (виж planner.py's системен промпт), включително за брифове, които са
+# просто стегнати, не оскъдни. Виж _thin_brief_precheck() за пълния контекст.
+_THIN_BUT_ADEQUATE_RE = re.compile(r"тънък[^.]{0,40}?,\s*но\s+(?:достатъч|съдържателен|стабилен|ясен)")
 
 # Редът на таговете, точно както ги пише runner.py (виж докстринга на модула там) — за
 # прогрес-бара в _run_with_spinner: позицията на тага в този списък е "стъпка N от 7".
@@ -847,8 +852,42 @@ class Repl:
         self.out(self.ink.dim("  Разбрах — тръгвам."))
         self._start_post(brief, attachments)
 
+    def _looks_like_echoed_output(self, brief: str) -> bool:
+        """
+        Пази срещу честа грешка при поставяне: инструментът копира готовия текст на всеки
+        пост в клипборда автоматично ("📋 копирано в клипборда"), и ако следващото поставяне
+        влезе в тази реплика вместо нов бриф, "нов ред = нов пост" разцепва готовия текст на
+        отделни "брифове" — реален случай (живо тестване, 2026-08-28): три отделни пускания
+        се получиха от трите абзаца на току-що генерирания пост, всяко похарчило поне едно
+        извикване към Планера, преди човекът да усети и да прекъсне с Ctrl+C.
+
+        Проверката е евтина и локална: сравнява само срещу последния генериран пост В ТАЗИ
+        сесия (self.state.post_dir), не срещу целия архив в posts/ — не е антиплагиатски
+        филтър, а бекъп само за точно този пропуск.
+        """
+        if self.state.post_dir is None:
+            return False
+        last_text = read_text_or_none(self.state.post_dir / "output" / "post.md")
+        if not last_text:
+            return False
+        candidate = brief.strip()
+        # Прагът от 40 знака пази от лъжливи положителни резултати при кратки, общи изречения
+        # (напр. "Благодарим на всички!"), които реално биха могли да съвпаднат случайно.
+        return len(candidate) >= 40 and candidate in last_text
+
     def _start_post(self, brief: str, attachments: list[Path]) -> None:
         """Общ край за нов пост — от свободен ред или от /wizard: папка, briefing.md, снимки, генериране."""
+        if self._looks_like_echoed_output(brief):
+            answer = self.input_fn(
+                self.ink.warn(
+                    "  ⚠ Това прилича на текст от последния генериран пост, не на нов бриф — "
+                    "случайно поставяне от клипборда? (Enter = продължи все пак, 'не' за отказ) › "
+                )
+            )
+            if answer.strip().lower() in {"не", "n", "no"}:
+                self.out(self.ink.dim("  Пропуснато."))
+                return
+
         post_dir = unique_post_dir(self.posts_dir, slugify(brief), today=self.today)
         post_dir.mkdir(parents=True, exist_ok=True)
         (post_dir / "briefing.md").write_text(brief + "\n", encoding="utf-8")
@@ -859,7 +898,61 @@ class Repl:
         self.state.revisions = 0
 
         self.out(self.ink.dim(f"  {post_dir}" + (f" · {len(copied)} снимка(и)" if copied else " · без снимки")))
-        self._generate(post_dir, force=False)
+
+        brief, enriched = self._thin_brief_precheck(post_dir, brief)
+        if enriched:
+            self.state.brief = brief
+        self._generate(post_dir, force=enriched)
+
+    def _thin_brief_precheck(self, post_dir: Path, brief: str) -> tuple[str, bool]:
+        """
+        Вариант 2 от research-plan-24-institution-gdpr-false-positive-and-word-floor.md: ако
+        Планерът класифицира брифа като "тънък", пита ЕДНО насочено уточняващо въпросче ПРЕДИ
+        да тръгне скъпият Писател/Критик/Консолидатор цикъл — вместо да остави Писателя да се
+        бори между измисляне на факти и честна краткост чак след похабени извиквания (виж
+        knowledge/voice/tone.md, правилото "спри честно, не пълни").
+
+        Вика Планера директно тук (не през run_pipeline) — резултатът се кешира в plan.json
+        точно както при нормално пускане (виж planner.py::should_skip), затова ако човекът
+        не добави нищо, следващото run_pipeline() НЕ прави повторно извикване, само чете кеша.
+
+        Ако брифът се обогати, старият plan.json вече не отговаря на новия текст и се трие,
+        за да не поднесе Писателят план, изчислен върху по-тънката версия — force=True кара
+        run_pipeline да преизчисли всичко наново.
+
+        Връща (евентуално обогатен бриф, дали брифът е променен).
+        """
+        assert self.config is not None and self.knowledge is not None
+        client = self.client_factory(self.config)
+        try:
+            plan = planner.run(post_dir, client, self.knowledge.stable_context, brief, force=False)
+        except AgentError:
+            return brief, False  # инфраструктурна грешка — нека реалното пускане отдолу я покаже
+
+        notes_lower = (plan.notes or "").lower()
+        if "тънък" not in notes_lower or _THIN_BUT_ADEQUATE_RE.search(notes_lower):
+            # "тънък, но достатъчен/съдържателен" е установената идиома на самия Планер
+            # (planner.py's системен промпт, раздел insufficient_brief) за "кратко, но има
+            # достатъчно за пост" — реален случай от живо тестване (2026-08-31, виж
+            # research-plan-25): бриф от 200+ думи с конкретни числа (€200 000 фонд, 15-членни
+            # делегации) пак получи думата "тънък" в notes, защото Планерът винаги я ползва за
+            # тази категория, а старата проверка гледаше само за самата дума "тънък", без да
+            # различава от истински оскъден бриф.
+            return brief, False
+
+        answer = self.input_fn(
+            self.ink.dim(
+                "  Планерът засече тънък бриф — има ли още детайл за добавяне "
+                "(число, име, резултат)? (Enter = продължи както е) › "
+            )
+        ).strip()
+        if not answer:
+            return brief, False
+
+        enriched_brief = f"{brief}\n\n{answer}"
+        (post_dir / "briefing.md").write_text(enriched_brief + "\n", encoding="utf-8")
+        (post_dir / "plan.json").unlink(missing_ok=True)
+        return enriched_brief, True
 
     def _run_with_spinner(self, fn: Callable[[], PipelineResult]) -> PipelineResult:
         """
@@ -945,7 +1038,7 @@ class Repl:
         try:
             result = self._run_with_spinner(
                 lambda: self.pipeline_fn(
-                    post_dir, client, force=force, knowledge=self.knowledge, mode=effective_mode
+                    post_dir, client, force=force, knowledge=self.knowledge, mode=effective_mode, today=self.today
                 )
             )
         except AgentError as exc:

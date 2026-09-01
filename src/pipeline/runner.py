@@ -63,7 +63,7 @@ from __future__ import annotations
 import dataclasses
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -155,6 +155,7 @@ def run_pipeline(
     force: bool = False,
     knowledge: BrandKnowledge | None = None,
     mode: str | None = None,
+    today: date | None = None,
 ) -> PipelineResult:
     """
     Валидира входа (общо за двете вериги), после разклонява на v3 (подразбиране) или v5
@@ -164,6 +165,10 @@ def run_pipeline(
     `mode` е режимът за дължина (pipeline/modes.py — "kadar"/"fokus"/"panorama"), избран
     ИЗРИЧНО от човека (REPL `/mode`, TUI `/mode`, CLI `--mode`), никога извеждан от модел.
     None/непознат/подразбиращ се "fokus" не пипа нищо — точно старото поведение.
+
+    `today` е инжектирана дата (същия модел като repl.py::unique_post_dir) — само за
+    тестваемост на formatting.py::_flag_anniversary_mismatch; None означава истинската
+    днешна дата.
     """
     log = setup_run_logger(post_dir)
     mode_obj = modes.get_mode(mode)
@@ -192,10 +197,24 @@ def run_pipeline(
 
     if chain == "v5":
         return _run_pipeline_v5(
-            post_dir, client, force=force, knowledge=knowledge, briefing_text=briefing_text, log=log, mode=mode_obj
+            post_dir,
+            client,
+            force=force,
+            knowledge=knowledge,
+            briefing_text=briefing_text,
+            log=log,
+            mode=mode_obj,
+            today=today,
         )
     return _run_pipeline_v3(
-        post_dir, client, force=force, knowledge=knowledge, briefing_text=briefing_text, log=log, mode=mode_obj
+        post_dir,
+        client,
+        force=force,
+        knowledge=knowledge,
+        briefing_text=briefing_text,
+        log=log,
+        mode=mode_obj,
+        today=today,
     )
 
 
@@ -211,10 +230,12 @@ def _run_pipeline_v3(
     briefing_text: str,
     log,
     mode: modes.PostMode = modes.get_mode(None),
+    today: date | None = None,
 ) -> PipelineResult:
     warnings: list[str] = []
     open_notes: list[str] = []
     effective_rules = _effective_format_rules(knowledge, mode)
+    founded_year = (knowledge.facts or {}).get("organization", {}).get("founded")
 
     # Стъпки 1-4 НЕ са подсигурени като 5/6/7 (виж докстринга на модула) — грешка тук спира
     # целия run. Ако е AgentError (напр. ModelUnavailableError), детайлът (суровата причина
@@ -283,11 +304,27 @@ def _run_pipeline_v3(
             words_min = effective_rules.words_min
             post_i_words = len(post_i_text.split())
             if words_min is not None and post_i_words < words_min:
-                findings.append(
-                    f"Дължина: постът е {post_i_words} думи, под минимума {words_min} от корпуса "
-                    f"(knowledge/voice/tone.md) — добави още конкретни факти (число, детайл, "
-                    f"резултат), не общи изречения, за да стигнеш поне {words_min} думи."
-                )
+                # Ако Планерът вече е класифицирал брифа като "тънък" в стъпка [1], тази
+                # находка НЕ бива безусловно да иска "добави факти" — реален случай (живо
+                # тестване, 2026-08-31, виж research-plan-25-adversarial-live-testing-
+                # findings.md, Б-3): точно тази безусловна формулировка накара Post II да
+                # запълни дупката с генерична философска проза (същия клас нарушение, който
+                # Критикът току-що отхвърли на Post I), защото инструкцията ѝ противоречеше
+                # директно на "спри честно" правилото от tone.md, без изобщо да провери дали
+                # брифът РЕАЛНО има още факти за добавяне.
+                if "тънък" in (plan.notes or "").lower():
+                    findings.append(
+                        f"Дължина: постът е {post_i_words} думи, под минимума {words_min}. "
+                        f"Планерът вече отбеляза тънък бриф — ако честните факти в брифа са "
+                        f"изчерпани, ОСТАВИ поста така: по-кратък и честен е по-добър от "
+                        f"удължен с измислена конкретика или преповтаряне на темата в bullet-и."
+                    )
+                else:
+                    findings.append(
+                        f"Дължина: постът е {post_i_words} думи, под минимума {words_min} от корпуса "
+                        f"(knowledge/voice/tone.md) — добави още конкретни факти (число, детайл, "
+                        f"резултат), не общи изречения, за да стигнеш поне {words_min} думи."
+                    )
                 log.info("[4] находка (код): под минимума %d думи (Post I: %d)", words_min, post_i_words)
 
             log.info("[4] присъда: %s · %d находки за запълване", critique.verdict.value, len(findings))
@@ -367,7 +404,14 @@ def _run_pipeline_v3(
     # [6б] Механичните правила от корпуса — налагат се в кода, не се оставят на модел.
     # Върви ПРЕДИ финалната проверка, за да не хаби Критикът бележки за вече поправени неща,
     # и ПРЕДИ записа, за да е output/post.md винаги публикуем.
-    formatted = formatting.enforce(official_text, effective_rules, brief_text=briefing_text)
+    formatted = formatting.enforce(
+        official_text,
+        effective_rules,
+        brief_text=briefing_text,
+        has_photos=bool(media_selection.selected),
+        founded_year=founded_year,
+        today=today,
+    )
     applied_fixes = formatted.fixes
     if formatted.text != official_text:
         official_text = formatted.text
@@ -392,6 +436,13 @@ def _run_pipeline_v3(
         open_notes.append(
             "Брифът изглежда без достатъчно съдържание за пост — Критик/Post II бяха "
             "пропуснати автоматично; текстът по-долу е буквалната чернова на Писателя."
+        )
+
+    if plan.is_sensitive:
+        open_notes.append(
+            "ЧУВСТВИТЕЛНА ТЕМА — Планерът прецени, че тя изисква преглед и одобрение преди "
+            "публикуване (CLAUDE.md: автономност хибрид — рутинните автономно, чувствителните "
+            "с одобрение). Прегледайте лично, дори ако няма други бележки по-долу."
         )
 
     status = "ready_with_notes" if (open_notes or warnings) else "ready"
@@ -454,6 +505,7 @@ def _run_pipeline_v5(
     briefing_text: str,
     log,
     mode: modes.PostMode = modes.get_mode(None),
+    today: date | None = None,
 ) -> PipelineResult:
     """
     Виж докстринга на модула за схемата. Разлика от v3, накратко: няма Post II/Консолидатор
@@ -465,6 +517,7 @@ def _run_pipeline_v5(
     config = client.config  # само v5 стигна дотук, значи client.config съществува (виж run_pipeline)
     n = max(1, config.writer_candidates)
     effective_rules = _effective_format_rules(knowledge, mode)
+    founded_year = (knowledge.facts or {}).get("organization", {}).get("founded")
 
     try:
         # [1] Планер — идентично на v3.
@@ -547,7 +600,14 @@ def _run_pipeline_v5(
     write_text(post_dir / "output" / "post.md", official_text + "\n")
 
     # [6] Механичните правила от корпуса — идентично на v3's [6б].
-    formatted = formatting.enforce(official_text, effective_rules, brief_text=briefing_text)
+    formatted = formatting.enforce(
+        official_text,
+        effective_rules,
+        brief_text=briefing_text,
+        has_photos=bool(media_selection.selected),
+        founded_year=founded_year,
+        today=today,
+    )
     applied_fixes = formatted.fixes
     if formatted.text != official_text:
         official_text = formatted.text
@@ -567,6 +627,13 @@ def _run_pipeline_v5(
         )
         warnings.append(warning_text)
         log.warning(warning_text)
+
+    if plan.is_sensitive:
+        open_notes.append(
+            "ЧУВСТВИТЕЛНА ТЕМА — Планерът прецени, че тя изисква преглед и одобрение преди "
+            "публикуване (CLAUDE.md: автономност хибрид — рутинните автономно, чувствителните "
+            "с одобрение). Прегледайте лично, дори ако няма други бележки по-долу."
+        )
 
     status = "ready_with_notes" if (open_notes or warnings) else "ready"
     log.info("Финален статус: %s (%d открити въпроса, %d предупреждения)", status, len(open_notes), len(warnings))

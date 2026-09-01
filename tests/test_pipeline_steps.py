@@ -245,6 +245,41 @@ def test_enforce_code_level_rules_flags_personal_name_outside_briefing_as_warnin
     assert any("Иван Петров" in v.detail for v in critique.rule_violations)
 
 
+def test_enforce_code_level_rules_does_not_flag_institution_name_as_personal_name():
+    """
+    Регресионен тест за реален фалшив положителен, потвърден ДВАЖДИ при живо тестване
+    (2026-08-28, 2026-08-31, виж research-plan-24-institution-gdpr-false-positive-and-word-floor.md):
+    "Община Варна" съвпада перфектно с "Име Фамилия" формата на _NAME_PATTERN (две
+    последователни капитализирани кирилски думи), но е институция, не лице.
+    """
+    critique = CritiqueSchema(verdict=Verdict.OK, facts=[], tone_issues=[], rule_violations=[], summary="")
+
+    critic.enforce_code_level_rules(
+        critique, "Подновихме партньорството с Община Варна за следващите три години.", "бриф без общината", []
+    )
+
+    assert critique.rule_violations == []
+
+
+def test_enforce_code_level_rules_does_not_flag_geographic_direction_as_personal_name():
+    """
+    Регресионен тест за реален фалшив положителен, потвърден ДВА пъти в едно адверсариално
+    живо тестване (2026-08-31, виж research-plan-25-adversarial-live-testing-findings.md):
+    "Северна Европа" и "Североизточна България" съвпадат с "Име Фамилия" формата на
+    _NAME_PATTERN — същият клас проблем като институциите, но за географски посоки.
+    """
+    critique = CritiqueSchema(verdict=Verdict.OK, facts=[], tone_issues=[], rule_violations=[], summary="")
+
+    critic.enforce_code_level_rules(
+        critique, "Партньорството отвори врати към клиенти от Северна Европа.", "бриф без региони", []
+    )
+    critic.enforce_code_level_rules(
+        critique, "Работим активно в Североизточна България.", "бриф без региони", []
+    )
+
+    assert critique.rule_violations == []
+
+
 def test_enforce_code_level_rules_does_not_flag_paragraph_boundary_as_name():
     """
     Регресионен тест за реален пропуск: \\s+ в _NAME_PATTERN матчваше и през нов ред —

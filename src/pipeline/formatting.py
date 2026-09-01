@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from datetime import date
 
 from src.brand.format_rules import (
     MONTHS,
@@ -166,6 +167,13 @@ def _add_missing_thematic_emoji(text: str, rules: FormatRules, fixes: list[str])
     структура, към която да се закачи. Ако безопасните места (благодарност, линк) се
     изчерпят преди минимума, остатъкът остава като бележка по-долу в enforce(), не се
     форсира с декоративна вложка.
+
+    Мястото за благодарност се търси на ниво ИЗРЕЧЕНИЕ, не ред — реален пропуск (живо
+    тестване, 2026-08-28): "Благодарим на всички 18 дами..." беше второто изречение в общ
+    абзац с наратив преди него, а старата проверка гледаше само дали РЕДЪТ започва с
+    "благодар". Постът излезе с 0 емоджита без дори опит за поправка. Същият клас проблем
+    вече е решен в _strip_placeholder_closing/_strip_meta_disclaimers по-долу, по същата
+    причина — тук просто не беше приложено.
     """
     if not rules.enforces_emoji or rules.emoji_min is None:
         return text
@@ -179,13 +187,21 @@ def _add_missing_thematic_emoji(text: str, rules: FormatRules, fixes: list[str])
     nonempty_indices = [i for i, line in enumerate(lines) if line.strip()]
     last_nonempty = nonempty_indices[-1] if nonempty_indices else None
 
-    # Място 1: благодарствен ред — почти сигурно структурен елемент по гласа на клъстера.
+    # Място 1: благодарствено изречение — почти сигурно структурен елемент по гласа на
+    # клъстера, независимо дали дели ред с предходно наративно изречение.
     if current < rules.emoji_min and "🙏" in rules.allowed_emoji:
         for i, line in enumerate(lines):
-            if line.strip().lower().startswith("благодар") and not extract_emoji(line):
-                lines[i] = f"🙏 {line}"
+            sentences = re.split(r"(?<=[.!?])\s+", line)
+            found_sentence = False
+            for j, sentence in enumerate(sentences):
+                if sentence.strip().lower().startswith("благодар") and not extract_emoji(sentence):
+                    sentences[j] = f"🙏 {sentence}"
+                    found_sentence = True
+                    break
+            if found_sentence:
+                lines[i] = " ".join(sentences)
                 current += 1
-                added.append("🙏 на благодарствения ред")
+                added.append("🙏 на благодарствено изречение")
                 break
 
     # Място 2: последният непразен ред, ако прилича на затваряща препратка (линк или
@@ -243,6 +259,31 @@ def _strip_placeholder_closing(text: str, fixes: list[str]) -> str:
             f"недовършен пост; по-добре без затваряща фраза, отколкото с нея без реален линк."
         )
     return "\n".join(new_lines)
+
+
+_PHOTO_CREDIT_RE = re.compile(r"(?im)^[ \t]*снимк[аи]?\s*:.*$\n?")
+
+
+def _strip_fake_photo_credit(text: str, has_photos: bool, fixes: list[str]) -> str:
+    """
+    Маха ред "Снимки: <кредит>", ако Media Picker не е избрал нито една снимка за поста.
+
+    Реален случай (2026-08-28, живо тестване): текстов пост (без снимки в photos/) излезе
+    със "Снимки: Архив ИКТ Клъстер – Варна" накрая — Писателят имитира буквално затварящия
+    ред от knowledge/examples/good/04-sreshta-pod-zvezdite.md (реален пост, който Е имал
+    снимки и Е кредитирал истински фотограф), но е измислил кредита за пост без нито една
+    снимка. Нито Критик, нито другите проверки тук хващат това, защото гледат твърдения/
+    линкове/емоджита, не съответствие текст↔действително избрани снимки.
+    """
+    if has_photos or not _PHOTO_CREDIT_RE.search(text):
+        return text
+    removed = [line.strip() for line in _PHOTO_CREDIT_RE.findall(text)]
+    text = _PHOTO_CREDIT_RE.sub("", text)
+    fixes.append(
+        f"Премахнат измислен ред за снимков кредит ({'; '.join(removed)}) — постът няма нито "
+        f"една избрана снимка (Media Picker не избра нищо), значи няма какво да се кредитира."
+    )
+    return text
 
 
 def _strip_meta_disclaimers(text: str, notes: list[str]) -> str:
@@ -343,6 +384,70 @@ def _flag_leva_currency(text: str, notes: list[str]) -> None:
     )
 
 
+_ANNIVERSARY_RE = re.compile(r"(\d{1,3})[ \t-]*годишнина")
+
+
+def _flag_anniversary_mismatch(text: str, founded_year: int | None, today: date, notes: list[str]) -> None:
+    """
+    Флагва "N-годишнина", чието N не съвпада с today.year - founded_year от facts.yaml —
+    само бележка, не пипа текста (същия модел като _flag_leva_currency).
+
+    Реален случай (живо тестване, 2026-08-31, виж
+    research-plan-25-adversarial-live-testing-findings.md, Б-2): бриф "тази година чества
+    5-годишнина" (клъстерът е основан 2008 г., 2026 г. = 18-годишнина) премина непроменено
+    през Планер → Писател → Критик (два пъти) → Консолидатор — публикуваният текст съдържаше
+    буквално и "основан през 2008 г.", и "5-годишнина" в едно изречение. За разлика от
+    _flag_impossible_dates по-горе, тук двете числа поотделно са валидни (2008 е истинска
+    година, 5 е представимо число за годишнина) — само комбинацията им е аритметично грешна,
+    затова изисква изричното сравнение тук, не разпознаване на невъзможен формат.
+    """
+    if founded_year is None:
+        return
+    expected = today.year - founded_year
+    for match in _ANNIVERSARY_RE.finditer(text):
+        claimed = int(match.group(1))
+        if claimed != expected:
+            notes.append(
+                f"Постът споменава \"{claimed}-годишнина\", но според facts.yaml (основан "
+                f"{founded_year} г.) {today.year} г. отговаря на {expected}-годишнина. "
+                f"Проверете и коригирайте преди публикуване."
+            )
+
+
+# Скриптове, които не би трябвало да се появят в българскоезичен пост — реален случай
+# (живо тестване, 2026-08-28): Post I съдържаше "Менторите协助стваха", китайски йероглифи
+# залепени вътре в българска дума — generation грешка на модела. Критикът я хвана тогава с
+# LLM преценка, но разчитането само на модел да забележи чужда писменост всеки път не е
+# надеждно — това е евтин механичен бекъп, същия модел като _flag_impossible_dates по-долу.
+# Диапазоните покриват CJK, хирагана/катакана, хангъл, арабица, иврит и тайландска
+# писменост — достатъчно широко за реални generation-глитчове, без да засяга кирилица,
+# латиница или емоджитата (отделен диапазон, вече обработени другаде).
+_FOREIGN_SCRIPT_RE = re.compile(
+    "["
+    "一-鿿"  # CJK Unified Ideographs
+    "぀-ヿ"  # хирагана + катакана
+    "가-힣"  # хангъл
+    "؀-ۿ"  # арабица
+    "֐-׿"  # иврит
+    "฀-๿"  # тайландска писменост
+    "]+"
+)
+
+
+def _flag_foreign_script(text: str, notes: list[str]) -> None:
+    """
+    Флагва символи от чужда писменост в текста — само бележка, не пипа думата: коя точно
+    част е повредена (една дума, цяло изречение) е преценка за човек, не механично изтриване.
+    """
+    found = sorted(set(_FOREIGN_SCRIPT_RE.findall(text)))
+    if found:
+        notes.append(
+            f"Открити са символи от чужда писменост в текста ({' '.join(found)}) — вероятно "
+            f"generation грешка на модела, не съзнателно добавен текст. Проверете и коригирайте "
+            f"засегнатите думи преди публикуване."
+        )
+
+
 def _opening_has_a_fact(text: str) -> bool:
     """Корпусът иска отваряне с число, дата или място. Числото и месецът са проверими."""
     first_line = next((line for line in text.splitlines() if line.strip()), "")
@@ -350,7 +455,15 @@ def _opening_has_a_fact(text: str) -> bool:
     return bool(_DIGIT_RE.search(first_line)) or any(month in lowered for month in MONTHS)
 
 
-def enforce(text: str, rules: FormatRules, *, brief_text: str = "") -> FormattingResult:
+def enforce(
+    text: str,
+    rules: FormatRules,
+    *,
+    brief_text: str = "",
+    has_photos: bool = True,
+    founded_year: int | None = None,
+    today: date | None = None,
+) -> FormattingResult:
     """Прилага механичните правила и връща поправения текст + какво е поправено/остава."""
     fixes: list[str] = []
     notes: list[str] = []
@@ -364,6 +477,7 @@ def enforce(text: str, rules: FormatRules, *, brief_text: str = "") -> Formattin
         working = _trim_excess_emoji(working, rules, fixes)
     working = _replace_unknown_urls(working, rules, brief_text, fixes)
     working = _strip_placeholder_closing(working, fixes)
+    working = _strip_fake_photo_credit(working, has_photos, fixes)
     working = _strip_meta_disclaimers(working, notes)
     if rules.enforces_emoji and rules.emoji_min is not None:
         working = _add_missing_thematic_emoji(working, rules, fixes)
@@ -392,5 +506,7 @@ def enforce(text: str, rules: FormatRules, *, brief_text: str = "") -> Formattin
 
     _flag_leva_currency(working, notes)
     _flag_impossible_dates(working, notes)
+    _flag_foreign_script(working, notes)
+    _flag_anniversary_mismatch(working, founded_year, today or date.today(), notes)
 
     return FormattingResult(text=working, fixes=fixes, notes=notes, unenforceable=list(rules.unparsed))

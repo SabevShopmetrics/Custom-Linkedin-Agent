@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
 
 import yaml
@@ -209,6 +210,45 @@ def test_impossible_date_is_flagged_but_left_untouched():
 def test_valid_dates_are_not_flagged():
     result = enforce("На 29 август ще отбележим годишнината.", sample_rules())
     assert not any("невъзможна" in note for note in result.notes)
+
+
+def test_anniversary_mismatch_is_flagged_but_left_untouched():
+    """
+    Регресионен тест за реален случай от адверсариално живо тестване (2026-08-31, виж
+    research-plan-25-adversarial-live-testing-findings.md, Б-2): бриф с невярна годишнина
+    (клъстерът е основан 2008 г., 2026 г. = 18-годишнина, не 5) премина непроменен през
+    целия конвейер. За разлика от невъзможна дата, тук двете числа поотделно са валидни —
+    само комбинацията им е аритметично грешна.
+    """
+    result = enforce(
+        "Основан през 2008 г., тази година клъстерът чества 5-годишнина.",
+        sample_rules(),
+        founded_year=2008,
+        today=date(2026, 8, 31),
+    )
+
+    assert "5-годишнина" in result.text  # текстът НЕ се пипа
+    assert any("5-годишнина" in note and "18-годишнина" in note for note in result.notes)
+
+
+def test_correct_anniversary_is_not_flagged():
+    result = enforce(
+        "Тази година клъстерът чества 18-годишнина от основаването си.",
+        sample_rules(),
+        founded_year=2008,
+        today=date(2026, 8, 31),
+    )
+
+    assert not any("годишнина" in note for note in result.notes)
+
+
+def test_anniversary_not_flagged_when_founded_year_is_unknown():
+    """Без founded_year (facts.yaml непопълнен) проверката мълчи, не гадае."""
+    result = enforce(
+        "Тази година чества 5-годишнина.", sample_rules(), founded_year=None, today=date(2026, 8, 31)
+    )
+
+    assert not any("годишнина" in note for note in result.notes)
 
 
 def test_known_and_briefed_urls_survive():

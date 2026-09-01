@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+from datetime import date
 from typing import Any
 
 from src.brand.format_rules import parse_format_rules
@@ -549,3 +550,85 @@ def test_short_post_i_gets_a_length_finding_and_triggers_second_post(tmp_path):
     # findings не е бил празен, въпреки че Критикът сам по себе си върна CLEAN_CRITIQUE.
     assert len(client.prompts[Role.WRITER]) == 2
     assert "по-дълъг" in result.post_path.read_text(encoding="utf-8")
+
+def test_length_finding_permits_honest_shortness_when_planner_flagged_a_thin_brief(tmp_path):
+    """
+    Регресионен тест за реална находка от адверсариално живо тестване (2026-08-31, виж
+    research-plan-25, Б-3): преди фикса тази находка безусловно искаше "добави още факти",
+    дори когато Планерът вече е отбелязал тънък бриф — противоречейки на "спри честно"
+    правилото от tone.md и карайки Post II да запълва дупката с генеричен пълнеж.
+    """
+    from src.brand.format_rules import FormatRules
+
+    post_dir = tmp_path / "post"
+    _write_briefing(post_dir)
+    thin_plan = PlanSchema(
+        post_type="събитие", format="само текст", tone="топло", needs_photos=False,
+        max_photo_count=0, is_sensitive=False, notes="Брифът е тънък — само 2 факта.",
+    )
+    client = FakeSequencedClient(
+        {
+            Role.PLANNER: [thin_plan],
+            Role.WRITER: ["Кратко.", "Все още кратко, но честно."],
+            Role.MEDIA: [MediaSelectionSchema(selected=[])],
+            Role.CRITIC: [CLEAN_CRITIQUE, CLEAN_CRITIQUE],
+            Role.CONSOLIDATOR: ["Все още кратко, но честно."],
+        }
+    )
+    knowledge = make_brand_knowledge(format_rules=FormatRules(words_min=20))
+
+    run_pipeline(post_dir, client, knowledge=knowledge)
+
+    second_prompt = client.prompts[Role.WRITER][1]
+    assert "спри честно" in second_prompt.lower() or "остави поста така" in second_prompt.lower()
+    assert "добави още конкретни факти" not in second_prompt.lower()
+
+
+def test_sensitive_plan_leaves_a_persistent_open_note(tmp_path):
+    """
+    Регресионен тест за реална находка от адверсариално живо тестване (2026-08-31, виж
+    research-plan-25-adversarial-live-testing-findings.md, Б-1): Планерът класифицираше
+    `is_sensitive: true` коректно, но това никога не стигаше до `PipelineResult.open_notes`/
+    `meta.json` — виждаше се само като живо лог съобщение, изчезващо след пускането.
+    CLAUDE.md изисква "чувствителните [постове] с одобрение" — липсата на персистентен
+    маркер означаваше, че чувствителен пост изглежда идентично на рутинен в записания резултат.
+    """
+    post_dir = tmp_path / "post"
+    _write_briefing(post_dir)
+    sensitive_plan = PlanSchema(
+        post_type="съкращения", format="само текст", tone="сериозен", needs_photos=False,
+        max_photo_count=0, is_sensitive=True,
+    )
+    client = FakeSequencedClient(
+        {
+            Role.PLANNER: [sensitive_plan],
+            Role.WRITER: ["Пост I."],
+            Role.MEDIA: [MediaSelectionSchema(selected=[])],
+            Role.CRITIC: [CLEAN_CRITIQUE, CLEAN_CRITIQUE],
+            Role.CONSOLIDATOR: ["Официално предложение."],
+        }
+    )
+
+    result = run_pipeline(post_dir, client, knowledge=make_brand_knowledge())
+
+    assert result.status == "ready_with_notes"
+    assert any("ЧУВСТВИТЕЛНА" in note for note in result.open_notes)
+
+def test_anniversary_mismatch_becomes_an_open_note(tmp_path):
+    """
+    Регресионен тест за реална находка от адверсариално живо тестване (2026-08-31, виж
+    research-plan-25, Б-2): невярна годишнина (клъстерът основан 2008 г., 2026 г. = 18, не
+    5) премина непроменена през целия конвейер и излезе в публикувания текст без бележка.
+    """
+    post_dir = tmp_path / "post"
+    _write_briefing(post_dir)
+    knowledge = make_brand_knowledge(facts={"organization": {"founded": 2008}})
+    client = make_client(
+        writer=["Пост I."],
+        critic=[CLEAN_CRITIQUE, CLEAN_CRITIQUE],
+        consolidator=["Основан през 2008 г., тази година клъстерът чества 5-годишнина."],
+    )
+
+    result = run_pipeline(post_dir, client, knowledge=knowledge, today=date(2026, 8, 31))
+
+    assert any("5-годишнина" in note and "18-годишнина" in note for note in result.open_notes)
