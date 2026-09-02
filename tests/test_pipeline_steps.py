@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 
 from src.errors import BriefingMissingError, BriefingNotFilledError
-from src.llm.schema import CritiqueSchema, PlanSchema, RuleViolation, Verdict
+from src.llm.schema import CritiqueSchema, FactCheck, FactSource, PlanSchema, RuleViolation, Verdict
 from src.pipeline import critic, media_picker, planner, writer
 from src.pipeline.runner import _is_unfilled_template, run_pipeline
 from tests.conftest import StubClient, make_brand_knowledge
@@ -34,6 +34,41 @@ def test_planner_skips_when_plan_json_exists(tmp_path):
     result = planner.run(post_dir, StubClient(), "", "бриф текст", force=False)
 
     assert result.post_type == "практики"
+
+
+def test_notes_flag_thin_brief_distinguishes_scarce_from_adequate():
+    """
+    Регресионен тест за реална инконсистентност между repl.py's precheck и runner.py's Б-3
+    находка за дължина, открита при живо тестване (2026-09-01, виж research-plan-26): двете
+    места проверяваха собствен, различаващ се regex за същия сигнал — сега споделят
+    planner.notes_flag_thin_brief.
+    """
+    assert planner.notes_flag_thin_brief("Брифът е тънък — само 2 факта.") is True
+    assert planner.notes_flag_thin_brief("Брифът е тънък, но достатъчен: 4 конкретни елемента.") is False
+    assert planner.notes_flag_thin_brief("Брифът е тънък, но съдържателен – богат на детайли.") is False
+    assert planner.notes_flag_thin_brief("Обичаен бриф с достатъчно детайли.") is False
+    assert planner.notes_flag_thin_brief(None) is False
+    assert planner.notes_flag_thin_brief("") is False
+
+
+def test_planner_prompt_excludes_positive_competitor_mentions_from_topic_replacement():
+    """
+    Регресионен тест за реален бъг от живо тестване (2026-09-02, wf-round1-3): Планерът
+    маркира requires_topic_replacement=true за чисто позитивно, некритично поздравление
+    към конкурентен клъстер ("не пасва на профила на страницата"), макар forbidden.md да
+    забранява само критика/сравнение с назована фирма, не похвала. Промптът трябва изрично
+    да изключва "не пасва на профила" и похвала/поздравление за друга организация (дори
+    конкурент) като валидни причини за това поле — иначе конвейерът грешно пропуска
+    Критик/Post II и показва на човека фалшиво "НАРУШАВА ПРАВИЛАТА" съобщение за нормален,
+    политики-съобразен пост.
+    """
+    prompt = planner.SYSTEM_PROMPT_TEMPLATE.lower()
+    assert "не съвпада с обичайния профил на страницата" in prompt
+    assert "не оправдава requires_topic_replacement" in prompt
+    assert "похвала" in prompt and "поздравление" in prompt
+    assert "конкурент" in prompt
+    # изрично казва, че положително споменаване не е критика/сравнение
+    assert 'не е "критика или сравнение"' in prompt
 
 
 def test_writer_skips_when_post_i_exists(tmp_path):
@@ -261,6 +296,122 @@ def test_enforce_code_level_rules_does_not_flag_institution_name_as_personal_nam
     assert critique.rule_violations == []
 
 
+def test_enforce_code_level_rules_does_not_flag_english_job_title_as_unknown_organization():
+    """
+    Регресионен тест за реален фалшив положителен от живо тестване (2026-09-02,
+    posts/2026-09-02-r4-job): бриф за обява за работа съдържаше длъжност на английски
+    ("Junior Data Analyst") — три последователни капитализирани латински думи, перфектно
+    съвпадение с _LATIN_ORG_PATTERN (Проверка 3), но е роля, не организация.
+    """
+    critique = CritiqueSchema(verdict=Verdict.OK, facts=[], tone_issues=[], rule_violations=[], summary="")
+
+    critic.enforce_code_level_rules(
+        critique,
+        "Зангадор търсят Junior Data Analyst на пълен работен ден.",
+        "бриф за обява",
+        [],
+    )
+
+    assert not any("Junior Data Analyst" in v.detail for v in critique.rule_violations)
+
+
+def test_enforce_code_level_rules_still_flags_a_real_latin_organization_ending_in_a_job_word():
+    """Огледален тест: истинска организация НЕ бива да се изключва само защото случайно
+    завършва на дума, съвпадаща с job-title опашка — тук нарочно избираме организация, чиято
+    последна дума НЕ е в _JOB_TITLE_TAIL_WORDS, за да потвърдим, че Проверка 3 общо взето
+    още работи след добавянето на изключението."""
+    critique = CritiqueSchema(verdict=Verdict.OK, facts=[], tone_issues=[], rule_violations=[], summary="")
+
+    critic.enforce_code_level_rules(
+        critique, "Партнираме си с Neurolink Systems за новата инициатива.", "бриф без тази фирма", []
+    )
+
+    assert any("Neurolink Systems" in v.detail for v in critique.rule_violations)
+
+
+def test_enforce_code_level_rules_flags_direct_quote_attribution_even_when_name_is_in_brief():
+    """
+    Регресионен тест за реален пропуск от живо тестване (2026-09-02,
+    posts/2026-09-02-t5-quote): Проверка 2 изключва имена, дословно присъстващи в брифа
+    ("операторът вероятно познава човека") — разумно за обичайно споменаване, но публично
+    приписано ИЗКАЗВАНЕ е по-силна форма на публично обвързване, изискваща отделно съгласие
+    за цитиране. Брифът съдържаше буквално "Иван Петров ми каза, че...".
+    """
+    critique = CritiqueSchema(verdict=Verdict.OK, facts=[], tone_issues=[], rule_violations=[], summary="")
+    briefing = 'Иван Петров от Зангадор ми каза, че е било "най-полезното обучение".'
+
+    critic.enforce_code_level_rules(
+        critique,
+        "Иван Петров сподели, че това е било най-полезното обучение на което е присъствал.",
+        briefing,
+        [],
+    )
+
+    assert any("Иван Петров" in v.detail and v.rule == "gdpr" for v in critique.rule_violations)
+
+
+def test_enforce_code_level_rules_flags_dash_style_testimonial_attribution():
+    """
+    Регресионен тест за реален пропуск, открит при ПОВТОРНО живо пускане на същия бриф
+    (2026-09-02, posts/2026-09-02-t5-recheck): Писателят цитира изказването не като "Име
+    сподели, че..." (единственият образец, покрит от първата версия на тази проверка), а
+    като тестимониална визитка — '„...цитат..." – Име Фамилия' — реален, вероятно по-чест
+    формат за LinkedIn тестимониали, който трябва да се хване по същата логика.
+    """
+    critique = CritiqueSchema(verdict=Verdict.OK, facts=[], tone_issues=[], rule_violations=[], summary="")
+    briefing = 'Иван Петров от Зангадор ми каза, че е било "най-полезното обучение".'
+
+    critic.enforce_code_level_rules(
+        critique,
+        '„Най-полезното обучение, на което съм присъствал." – Иван Петров',
+        briefing,
+        [],
+    )
+
+    assert any("Иван Петров" in v.detail and v.rule == "gdpr" for v in critique.rule_violations)
+
+
+def test_enforce_code_level_rules_dash_after_org_name_is_not_flagged():
+    """Огледален тест: тире след собственото име на организацията ('ИКТ Клъстер – Варна')
+    не бива да се бърка с тестимониална атрибуция — липсва затваряща кавичка преди тирето."""
+    critique = CritiqueSchema(verdict=Verdict.OK, facts=[], tone_issues=[], rule_violations=[], summary="")
+
+    critic.enforce_code_level_rules(
+        critique, "Благодарим на партньорите на ИКТ Клъстер – Варна за подкрепата.", "бриф", []
+    )
+
+    assert critique.rule_violations == []
+
+
+def test_enforce_code_level_rules_ordinary_name_mention_from_brief_is_not_flagged_by_quote_check():
+    """Огледален тест: обичайно споменаване на име БЕЗ глагол на говорене в непосредствена
+    близост не бива да се хваща от Проверка 5 — само истински цитат/изказване."""
+    critique = CritiqueSchema(verdict=Verdict.OK, facts=[], tone_issues=[], rule_violations=[], summary="")
+    briefing = "Благодарим на Иван Петров за помощта при организацията на събитието."
+
+    critic.enforce_code_level_rules(
+        critique, "Благодарим на Иван Петров за помощта при организацията на събитието.", briefing, []
+    )
+
+    assert critique.rule_violations == []
+
+
+def test_enforce_code_level_rules_does_not_duplicate_when_quoted_name_is_not_in_brief():
+    """Ако името НЕ е в брифа, Проверка 2 вече го хваща като 'извън брифа' — Проверка 5 не
+    бива да добавя втора, дублираща GDPR бележка за същото име."""
+    critique = CritiqueSchema(verdict=Verdict.OK, facts=[], tone_issues=[], rule_violations=[], summary="")
+
+    critic.enforce_code_level_rules(
+        critique,
+        "Иван Петров сподели, че това е било най-полезното обучение.",
+        "бриф без никакво име на служител",
+        [],
+    )
+
+    gdpr_notes_about_ivan = [v for v in critique.rule_violations if "Иван Петров" in v.detail]
+    assert len(gdpr_notes_about_ivan) == 1
+
+
 def test_enforce_code_level_rules_does_not_flag_geographic_direction_as_personal_name():
     """
     Регресионен тест за реален фалшив положителен, потвърден ДВА пъти в едно адверсариално
@@ -461,6 +612,69 @@ def test_enforce_code_level_rules_still_flags_unrelated_latin_org_when_own_name_
     assert any("Marina Tech Solutions" in v.detail for v in critique.rule_violations)
 
 
+def test_enforce_code_level_rules_flags_statistic_attributed_to_fabricated_institute_as_forbidden():
+    """
+    Регресионен тест за реален бъг от живо тестване (2026-09-02, posts/2026-09-02-wf-round1-5,
+    категория fabricated_third_party_statistic): постът цитираше "73% от МСП... според
+    проучване на Института за дигитална трансформация – Варна" — институт, който не
+    съществува никъде в facts.yaml/members.yaml. Проверка 1 на ФАКТИ приемаше твърдението за
+    "source: briefing" (дословно в брифа) и никога не го маркираше UNVERIFIED — брифът доказва
+    само какво е написал операторът, не че третата страна реално съществува. Проверка 4 хваща
+    точно този клас: статистика, приписана на непозната институция, е "forbidden" (вдига
+    HARD_REJECT), не само мека "gdpr" бележка.
+    """
+    critique = CritiqueSchema(verdict=Verdict.OK, facts=[], tone_issues=[], rule_violations=[], summary="")
+    draft = (
+        "73% от малките и средни предприятия във Варненска област вече използват инструменти "
+        "за изкуствен интелект. Тези данни от проучване на Института за дигитална "
+        "трансформация – Варна показват, че технологиите са част от текущата работна среда."
+    )
+    briefing = (
+        "според Институт за дигитална трансформация - Варна, 73% от МСП в областта вече "
+        "ползват AI инструменти"
+    )
+
+    critic.enforce_code_level_rules(critique, draft, briefing, [])
+
+    assert critique.verdict == Verdict.HARD_REJECT
+    forbidden = [v for v in critique.rule_violations if v.rule == "forbidden"]
+    assert len(forbidden) == 1
+    assert "Института за дигитална трансформация" in forbidden[0].detail
+
+
+def test_enforce_code_level_rules_flags_unknown_institution_mention_without_stat_as_gdpr_only():
+    """
+    Огледално на предишния тест: споменаване на непозната институция БЕЗ придружаваща
+    статистика/число/дума за проучване остава мека "gdpr" находка (същия клас като Проверка
+    3) — не всяко неизвестно институционно име е автоматично "forbidden", само когато носи
+    конкретна статистика/данни, приписани на него (виж rules/forbidden.md).
+    """
+    critique = CritiqueSchema(verdict=Verdict.OK, facts=[], tone_issues=[], rule_violations=[], summary="")
+
+    critic.enforce_code_level_rules(critique, "Благодарим на Център Ретро за партньорството!", "бриф без този център", [])
+
+    assert critique.verdict == Verdict.OK  # само gdpr, не hard_reject
+    assert any(
+        v.rule == "gdpr" and "Център Ретро" in v.detail for v in critique.rule_violations
+    )
+    assert not any(v.rule == "forbidden" for v in critique.rule_violations)
+
+
+def test_enforce_code_level_rules_does_not_flag_known_member_institute_citing_a_statistic():
+    """
+    Проверка 4 не бива да флагне реален член на клъстера ("Изследователски институт
+    "Зангадор"", виж members.yaml), дори когато е цитиран със статистика — само НЕПОЗНати
+    институции.
+    """
+    critique = CritiqueSchema(verdict=Verdict.OK, facts=[], tone_issues=[], rule_violations=[], summary="")
+    members = [{"name": 'Изследователски институт "Зангадор"', "mention_allowed": True}]
+    draft = 'Според проучване на Институт "Зангадор", 40% от фирмите вече ползват AI инструменти.'
+
+    critic.enforce_code_level_rules(critique, draft, "бриф", members)
+
+    assert not any(v.rule == "forbidden" for v in critique.rule_violations)
+
+
 def test_critic_run_wires_facts_yaml_organization_name_into_own_org_check(tmp_path):
     """
     Wiring-ниво на предишния тест: critic.run() трябва наистина да извади organization.name_en
@@ -546,3 +760,76 @@ def test_run_pipeline_raises_briefing_not_filled_for_unedited_example_template(t
 
     with pytest.raises(BriefingNotFilledError):
         run_pipeline(post_dir, StubClient(), force=False)
+
+
+def test_collect_findings_includes_hedged_briefing_fact():
+    """
+    Регресионен тест за реален бъг от живо тестване (2026-09-02,
+    posts/2026-09-02-wf-round1-6): факт с source="briefing" (проследим до брифа) НЕ е
+    UNVERIFIED, но брифът самият го изразява като хеджирана догадка ("струва ми се, не
+    съм сигурна"). Преди FactCheck.hedged такъв факт беше невидим за collect_findings,
+    защото тя филтрираше строго по `source is FactSource.UNVERIFIED` — Post II никога
+    не получаваше инструкция да го смекчи или премахне.
+    """
+    critique = CritiqueSchema(
+        verdict=Verdict.NEEDS_REVISION,
+        facts=[
+            FactCheck(
+                claim="три нови гимназии",
+                source=FactSource.BRIEFING,
+                hedged=True,
+                note="изразено като предположение, не потвърдена новина",
+            )
+        ],
+        tone_issues=[],
+        rule_violations=[],
+        summary="",
+    )
+
+    findings = critic.collect_findings(critique)
+
+    assert any("три нови гимназии" in f and "Хеджирано" in f for f in findings)
+
+
+def test_review_notes_includes_hedged_briefing_fact():
+    """
+    Огледално на предишния тест, но за пътя към ЧОВЕКА (review_notes): ако хеджираната
+    догадка оцелее непроменена до финалния текст, човекът, преглеждащ "ready_with_notes",
+    трябва да види предупреждение — не тишина, каквато беше преди FactCheck.hedged.
+    """
+    critique = CritiqueSchema(
+        verdict=Verdict.NEEDS_REVISION,
+        facts=[
+            FactCheck(
+                claim="три нови гимназии",
+                source=FactSource.BRIEFING,
+                hedged=True,
+                note="изразено като предположение, не потвърдена новина",
+            )
+        ],
+        tone_issues=[],
+        rule_violations=[],
+        summary="",
+    )
+
+    notes = critic.review_notes(critique)
+
+    assert any("три нови гимназии" in n and "Хеджирано" in n for n in notes)
+
+
+def test_collect_findings_does_not_duplicate_unverified_fact_as_hedged():
+    """Факт, който вече е UNVERIFIED, минава по UNVERIFIED клона, дори ако hedged=True би
+    бил технически верен — избягва двоен ред за едно и също твърдение."""
+    critique = CritiqueSchema(
+        verdict=Verdict.NEEDS_REVISION,
+        facts=[FactCheck(claim="40 членове", source=FactSource.UNVERIFIED, hedged=True, note="няма в брифа")],
+        tone_issues=[],
+        rule_violations=[],
+        summary="",
+    )
+
+    findings = critic.collect_findings(critique)
+
+    matches = [f for f in findings if "40 членове" in f]
+    assert len(matches) == 1
+    assert "Недоказано твърдение" in matches[0]

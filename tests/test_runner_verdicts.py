@@ -155,6 +155,46 @@ def test_critique_findings_reach_the_second_post_prompt(tmp_path):
     assert "звучи като превод от английски" in second_prompt
     assert "40 членове" in second_prompt
 
+def test_hedged_briefing_fact_reaches_the_second_post_prompt(tmp_path):
+    """
+    Регресионен тест за реален бъг от живо тестване (2026-09-02,
+    posts/2026-09-02-wf-round1-6, категория long_rambling_multi_topic): Критикът
+    правилно разпозна, че "три нови гимназии" е хеджирана догадка на оператора
+    ("струва ми се", "не съм сигурна"), но класифицира source="briefing" (правилно —
+    твърдението наистина Е в брифа). collect_findings/review_notes филтрираха строго по
+    `source is FactSource.UNVERIFIED`, затова находката никога не стигаше до Post II и
+    финалният пост публикуваше бройката като плосък, неквалифициран факт. FactCheck.hedged
+    затваря тази дупка — трябва да пътува до Писателя независимо от `source`.
+    """
+    post_dir = tmp_path / "post"
+    _write_briefing(post_dir)
+    critique = CritiqueSchema(
+        verdict=Verdict.NEEDS_REVISION,
+        facts=[
+            FactCheck(
+                claim="три нови гимназии",
+                source=FactSource.BRIEFING,
+                hedged=True,
+                note="Фактът е в брифа, но изразен като предположение ('струва ми се'), не като потвърдена новина.",
+            )
+        ],
+        tone_issues=[],
+        rule_violations=[],
+        summary="",
+    )
+    client = make_client(
+        writer=["Пост I с три нови гимназии.", "Пост II без плоско твърдение."],
+        critic=[critique, CLEAN_CRITIQUE],
+        consolidator=["Предложение."],
+    )
+
+    run_pipeline(post_dir, client, knowledge=make_brand_knowledge())
+
+    second_prompt = client.prompts[Role.WRITER][1]
+    assert "Хеджирано твърдение от брифа" in second_prompt
+    assert "три нови гимназии" in second_prompt
+
+
 def test_no_findings_skips_the_second_post(tmp_path):
     """Няма какво да се запълва → втори модел ход не се харчи, консолидира се само Post I."""
     post_dir = tmp_path / "post"
@@ -380,6 +420,91 @@ def test_successful_final_check_records_ok_status(tmp_path):
 
     assert meta["final_check"] == {"status": "ok"}
 
+# --------------------------------------------------------------- wait_for_final_check_seconds (план 29)
+
+class _DelayedRoleClient:
+    """Обвивка около FakeSequencedClient, добавяща изкуствено закъснение на N-тото извикване
+    на дадена роля — единственият начин да се симулира детерминистично "стъпка [7] не успя
+    в срока" (реалният `_start_async_final_check` тръгва в separate thread, отговорът идва от
+    HTTP извикване с реална латентност; тук нямаме нищо да закъснее, освен да го инжектираме)."""
+
+    def __init__(self, inner, *, delay_role, delay_call_index, delay_seconds):
+        self._inner = inner
+        self._delay_role = delay_role
+        self._delay_call_index = delay_call_index
+        self._delay_seconds = delay_seconds
+        self._call_counts: dict[Role, int] = {}
+        self.prompts = inner.prompts  # споделен обект — inner.complete го мутира на място
+        self.call_log = inner.call_log
+
+    def complete(self, role, prompt, *, system=None, images=None, schema=None):
+        count = self._call_counts.get(role, 0)
+        self._call_counts[role] = count + 1
+        if role == self._delay_role and count == self._delay_call_index:
+            time.sleep(self._delay_seconds)
+        return self._inner.complete(role, prompt, system=system, images=images, schema=schema)
+
+def test_wait_for_final_check_seconds_returns_async_notes_directly(tmp_path):
+    """
+    Реален бъг от живо тестване (2026-09-02, research-plan-29): `generate` е еднократно CLI
+    извикване — процесът приключваше веднага след печат на резюмето и убиваше daemon нишката
+    на стъпка [7], преди тя изобщо да напише резултат. `meta.json` показваше
+    `"final_check": {"status": "pending"}` буквално ВИНАГИ, никога "ok" — не просто "невидяно
+    на екрана" (познатият, приет компромис), а изобщо недовършено. С `wait_for_final_check_seconds
+    > 0`, `run_pipeline()` изчаква стъпка [7] и връща находките ѝ директно в `result`, БЕЗ да е
+    нужно extra polling на meta.json (за разлика от всички други тестове тук).
+    """
+    post_dir = tmp_path / "post"
+    _write_briefing(post_dir)
+    client = make_client(
+        writer=["Пост."],
+        critic=[CLEAN_CRITIQUE, tone_critique("клише в предложението")],
+        consolidator=["Пост."],
+    )
+
+    result = run_pipeline(post_dir, client, knowledge=make_brand_knowledge(), wait_for_final_check_seconds=5.0)
+
+    assert result.status == "ready_with_notes"
+    assert any("клише в предложението" in note for note in result.open_notes)
+
+def test_wait_for_final_check_seconds_zero_leaves_result_unchanged(tmp_path):
+    """Огледален тест: подразбиращото се поведение (0, REPL/chat) НЕ включва находките на
+    стъпка [7] в синхронно върнатия резултат — само в meta.json, след като фоновата нишка
+    приключи. Пази старото, документирано поведение непроменено за REPL/chat пътя."""
+    post_dir = tmp_path / "post"
+    _write_briefing(post_dir)
+    client = make_client(
+        writer=["Пост."],
+        critic=[CLEAN_CRITIQUE, tone_critique("клише в предложението")],
+        consolidator=["Пост."],
+    )
+
+    result = run_pipeline(post_dir, client, knowledge=make_brand_knowledge())
+
+    assert result.status == "ready"
+    assert not any("клише в предложението" in note for note in result.open_notes)
+    meta = _wait_for_async_final_check(post_dir)
+    assert any("клише в предложението" in note for note in meta["open_notes"])
+
+def test_wait_for_final_check_seconds_timeout_falls_back_to_pending_result(tmp_path):
+    """Ако стъпка [7] не приключи в зададения срок, `run_pipeline()` връща резултата БЕЗ да
+    увисне за неопределено време — best-effort, не гаранция (виж докстринга на run_pipeline)."""
+    post_dir = tmp_path / "post"
+    _write_briefing(post_dir)
+    inner = make_client(
+        writer=["Пост."],
+        critic=[CLEAN_CRITIQUE, tone_critique("находка, пристигнала твърде късно")],
+        consolidator=["Пост."],
+    )
+    client = _DelayedRoleClient(inner, delay_role=Role.CRITIC, delay_call_index=1, delay_seconds=0.3)
+
+    result = run_pipeline(post_dir, client, knowledge=make_brand_knowledge(), wait_for_final_check_seconds=0.05)
+
+    assert result.status == "ready"
+    assert not any("находка, пристигнала твърде късно" in note for note in result.open_notes)
+    meta = _wait_for_async_final_check(post_dir, timeout=5.0)  # почисти фоновата нишка преди следващия тест
+    assert any("находка, пристигнала твърде късно" in note for note in meta["open_notes"])
+
 # --------------------------------------------------------------- недостатъчен бриф (А2/B4)
 
 def test_insufficient_brief_skips_critic_and_second_post(tmp_path):
@@ -421,6 +546,41 @@ def test_insufficient_brief_skips_critic_and_second_post(tmp_path):
     assert not (post_dir / "post_ii.md").exists()
     assert meta["final_check"] == {"status": "skipped"}
     assert meta["insufficient_brief"] is True
+
+def test_requires_topic_replacement_skips_critic_and_second_post(tmp_path):
+    """
+    Регресионен тест за реална находка от адверсариално живо тестване (2026-09-01, виж
+    research-plan-26-forbidden-topics-and-numeric-relationships.md, Част А): без този байпас
+    Критикът третираше честния отказ на Писателя за забранена тема (напр. религиозен повод)
+    като "проблем с формата" и настояваше за "нова версия със заменена инициатива" — Post II
+    отговори, като си измисли ЦЯЛО фиктивно събитие (дата + дневен ред), само за да прилича
+    на нормален пост. Огледален тест на test_insufficient_brief_skips_critic_and_second_post.
+    """
+    post_dir = tmp_path / "post"
+    _write_briefing(post_dir)
+    forbidden_plan = PlanSchema(
+        post_type="религиозен повод", format="само текст", tone="неутрален", needs_photos=False,
+        max_photo_count=0, is_sensitive=True, requires_topic_replacement=True,
+    )
+    client = FakeSequencedClient(
+        {
+            Role.PLANNER: [forbidden_plan],
+            Role.WRITER: ["Няма достатъчно информация — темата нарушава правилата на клъстера."],
+            Role.MEDIA: [MediaSelectionSchema(selected=[])],
+            Role.CRITIC: [],  # НЕ бива да се извика — нито синхронно, нито асинхронно
+            Role.CONSOLIDATOR: ["Няма достатъчно информация — темата нарушава правилата на клъстера."],
+        }
+    )
+
+    result = run_pipeline(post_dir, client, knowledge=make_brand_knowledge())
+    meta = _wait_for_async_final_check(post_dir)
+
+    assert result.merged_from == ["post_i.md"]
+    assert result.insufficient_brief is True  # преизползва same REPL retry път
+    assert any("НАРУШАВА ПРАВИЛАТА" in note for note in result.open_notes)
+    assert not (post_dir / "post_ii.md").exists()
+    assert meta["final_check"] == {"status": "skipped"}
+
 
 def test_sufficient_brief_is_unaffected_by_the_insufficient_brief_gate(tmp_path):
     """Регресионна ограда: нормален бриф (insufficient_brief по подразбиране False) минава по стария път, непроменено."""
@@ -569,6 +729,42 @@ def test_length_finding_permits_honest_shortness_when_planner_flagged_a_thin_bri
     client = FakeSequencedClient(
         {
             Role.PLANNER: [thin_plan],
+            Role.WRITER: ["Кратко.", "Все още кратко, но честно."],
+            Role.MEDIA: [MediaSelectionSchema(selected=[])],
+            Role.CRITIC: [CLEAN_CRITIQUE, CLEAN_CRITIQUE],
+            Role.CONSOLIDATOR: ["Все още кратко, но честно."],
+        }
+    )
+    knowledge = make_brand_knowledge(format_rules=FormatRules(words_min=20))
+
+    run_pipeline(post_dir, client, knowledge=knowledge)
+
+    second_prompt = client.prompts[Role.WRITER][1]
+    assert "спри честно" in second_prompt.lower() or "остави поста така" in second_prompt.lower()
+    assert "добави още конкретни факти" not in second_prompt.lower()
+
+
+def test_length_finding_permits_honest_shortness_for_sensitive_plan_even_without_the_word_thin(tmp_path):
+    """
+    Регресионен тест за реална, по-сериозна находка от адверсариално живо тестване
+    (2026-09-01, виж research-plan-27): бриф за уволнение на конкретен, назован служител.
+    Планерът написа бележка изцяло за чувствителност/тон (HR/юридически контрол), БЕЗ
+    думата "тънък" — planner.notes_flag_thin_brief() затова връщаше False и находката
+    поиска "добави факти", което накара Писателя да си измисли номер на заповед и
+    позоваване на Трудовия кодекс за реално лице. plan.is_sensitive сега печели безусловно.
+    """
+    from src.brand.format_rules import FormatRules
+
+    post_dir = tmp_path / "post"
+    _write_briefing(post_dir)
+    sensitive_plan = PlanSchema(
+        post_type="кадрово решение", format="само текст", tone="сух", needs_photos=False,
+        max_photo_count=0, is_sensitive=True,
+        notes="Поводът изисква задължителен човешки контрол (HR/Юридически отдел) за съответствие с GDPR.",
+    )
+    client = FakeSequencedClient(
+        {
+            Role.PLANNER: [sensitive_plan],
             Role.WRITER: ["Кратко.", "Все още кратко, но честно."],
             Role.MEDIA: [MediaSelectionSchema(selected=[])],
             Role.CRITIC: [CLEAN_CRITIQUE, CLEAN_CRITIQUE],

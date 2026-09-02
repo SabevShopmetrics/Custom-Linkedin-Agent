@@ -156,6 +156,7 @@ def run_pipeline(
     knowledge: BrandKnowledge | None = None,
     mode: str | None = None,
     today: date | None = None,
+    wait_for_final_check_seconds: float = 0.0,
 ) -> PipelineResult:
     """
     Валидира входа (общо за двете вериги), после разклонява на v3 (подразбиране) или v5
@@ -169,6 +170,17 @@ def run_pipeline(
     `today` е инжектирана дата (същия модел като repl.py::unique_post_dir) — само за
     тестваемост на formatting.py::_flag_anniversary_mismatch; None означава истинската
     днешна дата.
+
+    `wait_for_final_check_seconds` (виж research-plan-29): 0 (подразбиране) запазва старото
+    fire-and-forget поведение на стъпка [7] — правилно за REPL/chat, където блокирането би
+    забавило всяка следваща команда с до 70-350+s (потребителска инструкция 2026-08-25,
+    "~600 секунди, оправи го", е точно причината стъпка [7] да стане async). CLI `generate`
+    е ЕДНОКРАТНО извикване — процесът приключва веднага след печат на резюмето и убива
+    daemon нишката на стъпка [7], преди тя изобщо да напише резултат в meta.json (затова
+    `final_check.status` оставаше "pending" завинаги, не само "невидяно на екрана", какъвто
+    беше познатият, документиран компромис). При стойност > 0, `generate` изчаква толкова
+    секунди стъпка [7] да завърши, преди да върне резултата — само best-effort: ако не успее
+    в срока, продължава без нея (текущото поведение), не увисва безкрайно.
     """
     log = setup_run_logger(post_dir)
     mode_obj = modes.get_mode(mode)
@@ -205,6 +217,7 @@ def run_pipeline(
             log=log,
             mode=mode_obj,
             today=today,
+            wait_for_final_check_seconds=wait_for_final_check_seconds,
         )
     return _run_pipeline_v3(
         post_dir,
@@ -215,6 +228,7 @@ def run_pipeline(
         log=log,
         mode=mode_obj,
         today=today,
+        wait_for_final_check_seconds=wait_for_final_check_seconds,
     )
 
 
@@ -231,6 +245,7 @@ def _run_pipeline_v3(
     log,
     mode: modes.PostMode = modes.get_mode(None),
     today: date | None = None,
+    wait_for_final_check_seconds: float = 0.0,
 ) -> PipelineResult:
     warnings: list[str] = []
     open_notes: list[str] = []
@@ -253,6 +268,17 @@ def _run_pipeline_v3(
         log.info("[1] чувствителен: %s", "да" if plan.is_sensitive else "не")
         if plan.notes:
             log.info("[1] бележка на Планера: %s", plan.notes)
+        if plan.requires_topic_replacement:
+            log.info("[1] темата на брифа нарушава ЗАБРАНЕНО — нужен е нов повод от човек.")
+
+        # Критик/Post II се пропускат при insufficient_brief (виж research-plan-18/19) И при
+        # requires_topic_replacement (виж research-plan-26-forbidden-topics-and-numeric-
+        # relationships.md, Част А) — реален случай, открит при живо тестване: без този байпас
+        # Критикът третираше честния отказ на Писателя за забранена тема (напр. религиозен
+        # повод) като "проблем с формата" и настояваше за "нова версия със заменена
+        # инициатива" — Post II изпълни искането, като си измисли ЦЯЛО фиктивно събитие
+        # (конкретна дата, конкретен дневен ред), само за да прилича на нормален пост.
+        skip_critic_and_second_post = plan.insufficient_brief or plan.requires_topic_replacement
 
         # [2] Писател и [3] Media Picker вървят паралелно — независими една от друга
         log.info("[2]/[3] Писател + Media Picker (паралелно)...")
@@ -288,8 +314,11 @@ def _run_pipeline_v3(
         # "само механично чистене" път (second_post=None), който изрично не добавя ново
         # съдържание — честният отказ на Писателя остава непроменен.
         findings: list[str] = []
-        if plan.insufficient_brief:
-            log.info("[4]-[6] Пропуснати — брифът е маркиран от Планера като недостатъчен.")
+        if skip_critic_and_second_post:
+            log.info(
+                "[4]-[6] Пропуснати — брифът е маркиран от Планера като %s.",
+                "недостатъчен" if plan.insufficient_brief else "нарушаващ ЗАБРАНЕНО (нужен нов повод)",
+            )
         else:
             log.info("[4] Критик върху Post I...")
             critique = critic.run(post_dir, client, knowledge, plan, briefing_text, post_i_text, force=force)
@@ -304,15 +333,28 @@ def _run_pipeline_v3(
             words_min = effective_rules.words_min
             post_i_words = len(post_i_text.split())
             if words_min is not None and post_i_words < words_min:
-                # Ако Планерът вече е класифицирал брифа като "тънък" в стъпка [1], тази
-                # находка НЕ бива безусловно да иска "добави факти" — реален случай (живо
+                # Ако Планерът вече е класифицирал брифа като истински "тънък" (не просто
+                # "тънък, но достатъчен" — виж planner.notes_flag_thin_brief) в стъпка [1],
+                # тази находка НЕ бива безусловно да иска "добави факти" — реален случай (живо
                 # тестване, 2026-08-31, виж research-plan-25-adversarial-live-testing-
                 # findings.md, Б-3): точно тази безусловна формулировка накара Post II да
                 # запълни дупката с генерична философска проза (същия клас нарушение, който
                 # Критикът току-що отхвърли на Post I), защото инструкцията ѝ противоречеше
                 # директно на "спри честно" правилото от tone.md, без изобщо да провери дали
                 # брифът РЕАЛНО има още факти за добавяне.
-                if "тънък" in (plan.notes or "").lower():
+                #
+                # plan.is_sensitive проверява СЪЩОТО и отделно от текстовото "тънък" — реален,
+                # по-сериозен случай (живо тестване, 2026-09-01, виж research-plan-27): бриф за
+                # уволнение на конкретен, назован служител. Планерът написа бележка изцяло за
+                # чувствителност/тон (HR/юридически контрол, "без детайли за поведението"), без
+                # думата "тънък" изобщо — защото фокусът му беше сензитивността, не дължината.
+                # planner.notes_flag_thin_brief() затова върна False и находката поиска "добави
+                # факти", което накара Писателя да си измисли номер на заповед и позоваване на
+                # Трудовия кодекс — нито едното в брифа — за реално, назовано лице. За
+                # чувствителни теми "добави факти, които не съществуват" е несравнимо по-опасно
+                # от генерична философска проза, затова тук печели безусловно, независимо дали
+                # Планерът е използвал точно думата "тънък".
+                if plan.is_sensitive or planner.notes_flag_thin_brief(plan.notes):
                     findings.append(
                         f"Дължина: постът е {post_i_words} думи, под минимума {words_min}. "
                         f"Планерът вече отбеляза тънък бриф — ако честните факти в брифа са "
@@ -437,6 +479,13 @@ def _run_pipeline_v3(
             "Брифът изглежда без достатъчно съдържание за пост — Критик/Post II бяха "
             "пропуснати автоматично; текстът по-долу е буквалната чернова на Писателя."
         )
+    elif plan.requires_topic_replacement:
+        open_notes.append(
+            "ТЕМАТА НА БРИФА НАРУШАВА ПРАВИЛАТА (rules/forbidden.md) — Критик/Post II бяха "
+            "пропуснати автоматично, за да остане честният отказ на Писателя непроменен, "
+            "вместо да бъде преправен да изглежда като нормален пост. Нужен е изцяло нов "
+            "повод от човек, не само редакция на текста по-долу."
+        )
 
     if plan.is_sensitive:
         open_notes.append(
@@ -462,10 +511,13 @@ def _run_pipeline_v3(
         merged_from=merged_from,
         applied_fixes=applied_fixes,
         resolution_summary=None,
-        insufficient_brief=plan.insufficient_brief,
+        # skip_critic_and_second_post, не само insufficient_brief — requires_topic_replacement
+        # ползва СЪЩИЯ REPL "напиши детайли сега, за да генерирам наново" път (repl.py), защото
+        # там нужният отговор е точно същият: нов, различен повод от човека.
+        insufficient_brief=skip_critic_and_second_post,
         extra_meta={
             **_ai_act_meta(),
-            "final_check": {"status": "skipped"} if plan.insufficient_brief else {"status": "pending"},
+            "final_check": {"status": "skipped"} if skip_critic_and_second_post else {"status": "pending"},
         },
     )
 
@@ -484,11 +536,13 @@ def _run_pipeline_v3(
     # отговор — ако тази async проверка на ПЪРВОТО (изоставено) пускане все още тече, докато
     # второто вече е записало нов meta.json, read-merge-write-ът ѝ презаписва бележки за
     # текст, който вече не е на екрана.
-    if plan.insufficient_brief:
-        log.info("[7] Пропусната — брифът е маркиран от Планера като недостатъчен (виж [4]-[6]).")
+    if skip_critic_and_second_post:
+        log.info("[7] Пропусната — брифът е маркиран от Планера като недостатъчен/със забранена тема (виж [4]-[6]).")
     else:
         log.info("[7] Критик върху предложението (async, информативно)...")
-        _start_async_final_check(post_dir, client, knowledge, plan, briefing_text, official_text, findings=findings)
+        thread = _start_async_final_check(post_dir, client, knowledge, plan, briefing_text, official_text, findings=findings)
+        if wait_for_final_check_seconds > 0:
+            result = _await_final_check(thread, post_dir, result, wait_for_final_check_seconds, log)
 
     return result
 
@@ -506,6 +560,7 @@ def _run_pipeline_v5(
     log,
     mode: modes.PostMode = modes.get_mode(None),
     today: date | None = None,
+    wait_for_final_check_seconds: float = 0.0,
 ) -> PipelineResult:
     """
     Виж докстринга на модула за схемата. Разлика от v3, накратко: няма Post II/Консолидатор
@@ -658,14 +713,16 @@ def _run_pipeline_v5(
     # [7] Финален критик — АСИНХРОННО (план 15, Част 4/1.1: тази стъпка сама изяжда ~70s в
     # v3, без да променя изхода — чисто информативна и там). Виж _start_async_final_check
     # защо не пише през споделения logger.
-    _start_async_final_check(post_dir, client, knowledge, plan, briefing_text, official_text)
+    thread = _start_async_final_check(post_dir, client, knowledge, plan, briefing_text, official_text)
+    if wait_for_final_check_seconds > 0:
+        result = _await_final_check(thread, post_dir, result, wait_for_final_check_seconds, log)
 
     return result
 
 
 def _start_async_final_check(
     post_dir, client, knowledge, plan, briefing_text, official_text, *, findings: list[str] | None = None
-) -> None:
+) -> threading.Thread:
     """
     Стъпка [7], извън критичния път — тече във фонов daemon thread, за да не блокира вече
     показания на човека резултат. Споделена между v3 и v5 (v3 я вика с `findings`, за да
@@ -729,6 +786,43 @@ def _start_async_final_check(
 
     thread = threading.Thread(target=_worker, daemon=True, name=f"final-check-{post_dir.name}")
     thread.start()
+    return thread
+
+
+def _await_final_check(
+    thread: threading.Thread, post_dir: Path, result: PipelineResult, timeout_seconds: float, log
+) -> PipelineResult:
+    """
+    Best-effort изчакване на стъпка [7] за caller-и, които могат да си позволят да блокират
+    (виж докстринга на run_pipeline, `wait_for_final_check_seconds`) — за разлика от REPL/chat,
+    еднократно CLI извикване не убива никого другиго, ако отговори няколко секунди по-бавно.
+
+    Ако нишката завърши в срока: препрочита output/meta.json (вече обновен от
+    `_merge_async_notes_into_meta` в самата нишка) и връща НОВ `PipelineResult` с пресни
+    open_notes/status/resolution_summary — вместо мутация на място, за да остане очевидно
+    в diff-а на извикващия код, че резултатът може да се различава от подадения.
+    Ако не завърши в срока: връща `result` непроменен — нишката продължава на фон като
+    daemon (текущото поведение), просто този caller спира да я чака.
+    """
+    thread.join(timeout=timeout_seconds)
+    if thread.is_alive():
+        log.info(
+            "[7] Финалната проверка не завърши в рамките на %.0fs изчакване — продължава на "
+            "фон, резултатът тук е без нея.",
+            timeout_seconds,
+        )
+        return result
+    meta_path = post_dir / "output" / "meta.json"
+    try:
+        meta = read_json(meta_path)
+    except (OSError, ValueError):
+        return result
+    return dataclasses.replace(
+        result,
+        status=meta.get("status", result.status),
+        open_notes=list(meta.get("open_notes", result.open_notes)),
+        resolution_summary=meta.get("resolution_summary", result.resolution_summary),
+    )
 
 
 def _append_run_log(log_path: Path, message: str) -> None:

@@ -92,7 +92,12 @@ def cmd_generate(args: argparse.Namespace) -> int:
     client = LLMClient(config)
 
     try:
-        result = run_pipeline(post_dir, client, force=force, mode=mode_key)
+        # wait_for_final_check_seconds=90: `generate` е еднократно извикване — процесът
+        # приключва веднага след печат и убива daemon нишката на стъпка [7], преди тя изобщо
+        # да напише резултат (виж докстринга на run_pipeline и research-plan-29). За разлика
+        # от REPL/chat, тук блокирането до 90s не бави следваща команда — просто резултатът
+        # се връща малко по-късно, best-effort.
+        result = run_pipeline(post_dir, client, force=force, mode=mode_key, wait_for_final_check_seconds=90.0)
     except AgentError as exc:
         # Единствените изключения тук са за вход/инфраструктура — виж докстринга на runner.py.
         print(f"\n✗ Спряно: {exc.human_message}")
