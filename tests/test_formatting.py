@@ -111,6 +111,25 @@ def test_disallowed_emoji_are_removed():
     assert any("неразрешени емоджи" in fix for fix in result.fixes)
 
 
+def test_disallowed_emoji_with_variation_selector_leaves_no_orphan_behind():
+    """
+    Реален случай от живо тестване (2026-09-04, TUI пилот случай 12). Писателят написа
+    "🗓️" и "👁️" — базов символ + невидим U+FE0F variation selector. И двата не са в
+    allowed_emoji, но extract_emoji() съвпада само с базовия символ, а не с VS16 след
+    него. Наивно text.replace(base, "") маха базата и оставя невидим "призрак" в текста
+    ("Варна. ️\\n\\n...") — не се вижда при преглед, но е реален байт в публикувания пост.
+    """
+    result = enforce(
+        "Утре ще се съберем. 🗓️ Ще следим на живо. 👁️ 🙏",
+        sample_rules(),
+    )
+
+    assert "️" not in result.text
+    assert "🗓" not in result.text
+    assert "👁" not in result.text
+    assert "🙏" in result.text
+
+
 def test_hashtags_are_removed():
     result = enforce("12 участници на срещата. #ИКТ #Варна", sample_rules())
 
@@ -295,6 +314,92 @@ def test_impossible_date_is_flagged_but_left_untouched():
 def test_valid_dates_are_not_flagged():
     result = enforce("На 29 август ще отбележим годишнината.", sample_rules())
     assert not any("невъзможна" in note for note in result.notes)
+
+
+def test_wall_of_text_without_paragraph_breaks_is_flagged_but_left_untouched():
+    """
+    Регресионен тест за реален бъг от жива продукция (2026-09-03): Post I и Post II имаха
+    ясно разделени абзаци и по 2 емоджита всяка, но Консолидаторът ги сля в ЕДИН гигантски
+    неразделен блок текст, без нито едно емоджи — нищо, посочено от Критика, не обясняваше
+    премахването им. Постът изглеждаше като провалена автоматизация, не като писан от
+    човек текст. Механичен бекъп, независим от промпт инструкцията към Консолидатора.
+    """
+    long_single_paragraph = " ".join(["дума"] * 90) + "."
+    result = enforce(long_single_paragraph, sample_rules())
+
+    assert "\n\n" not in result.text  # само бележка — не се добавя разделяне на абзаци
+    assert any("един неразделен абзац" in note for note in result.notes)
+
+
+def test_short_single_paragraph_is_not_flagged_as_wall_of_text():
+    """Огледален тест: честно кратък едноабзацен пост (тънък бриф) не бива да се флагва —
+    прагът е нарочно над честния минимум за кратки постове."""
+    result = enforce("Кратка новина в един абзац, само няколко изречения.", sample_rules())
+
+    assert not any("неразделен абзац" in note for note in result.notes)
+
+
+def test_multi_paragraph_post_is_not_flagged_as_wall_of_text():
+    long_multi_paragraph = ("\n\n").join([" ".join(["дума"] * 30) + "."] * 3)
+    result = enforce(long_multi_paragraph, sample_rules())
+
+    assert not any("неразделен абзац" in note for note in result.notes)
+
+
+def test_bracket_placeholder_mid_sentence_is_flagged_but_left_untouched():
+    """
+    Регресионен тест за реален бъг от живо тестване (2026-09-04, TUI Pilot с реални снимки
+    от Downloads): бриф без дата/място произведе буквално "На [дата] ... в [място]." в
+    готовия текст — плейсхолдър-скоба СРЕД изречението, не в затваряща формула ("[линк]",
+    вече покрит от _strip_placeholder_closing). Само бележка — премахване без контекст би
+    оставило граматически счупено изречение.
+    """
+    result = enforce("На [дата] се проведе неформална среща в [място]. Благодарим на всички.", sample_rules())
+
+    assert "[дата]" in result.text and "[място]" in result.text  # текстът не се пипа
+    assert any("[дата]" in note and "[място]" in note for note in result.notes)
+
+
+def test_text_without_brackets_is_not_flagged():
+    result = enforce("Проведохме среща вчера в офиса. Благодарим на всички.", sample_rules())
+
+    assert not any("скоба-плейсхолдър" in note for note in result.notes)
+
+
+def test_orphan_opening_fragment_is_flagged_but_left_untouched():
+    """
+    Регресионен тест за реален бъг от жива продукция (TUI полеви тест, 2026-09-10, бриф
+    "Имаме нов партньор."): Консолидаторът, опитвайки се да удовлетвори правилото за
+    отваряне с факт/място, залепи самотна дума в самото начало, несвързана граматически с
+    истинското изречение след нея ("Варна. ИКТ Клъстер разшири..."). post_i.md (суровата
+    чернова на Писателя) нямаше този проблем — появи се конкретно при синтеза. Само бележка
+    — премахване без контекст би оставило текста без отваряне изобщо.
+    """
+    result = enforce(
+        "Варна. ИКТ Клъстер разшири кръга си на партньори с нова организация.", sample_rules()
+    )
+
+    assert result.text.startswith("Варна.")  # текстът не се пипа
+    assert any('"Варна."' in note for note in result.notes)
+
+
+def test_normal_opening_with_place_as_subject_is_not_flagged():
+    """Огледален тест: мястото, вплетено граматически като подлог на изречението, не е бъг."""
+    result = enforce(
+        "ИКТ Клъстер – Варна разшири кръга си на партньори с нова организация.", sample_rules()
+    )
+
+    assert not any("изолиран фрагмент" in note for note in result.notes)
+
+
+def test_exclamatory_opening_word_is_not_flagged_as_orphan_fragment():
+    """
+    Кратка възклицателна дума в началото ("Успяхме!") е легитимен, ентусиазиран стил, не
+    счупен фрагмент — регексът гледа само за буквална точка, не удивителен знак.
+    """
+    result = enforce("Успяхме! Организирахме успешно хакатон за 50 студенти.", sample_rules())
+
+    assert not any("изолиран фрагмент" in note for note in result.notes)
 
 
 def test_anniversary_mismatch_is_flagged_but_left_untouched():

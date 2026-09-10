@@ -16,10 +16,12 @@ from pathlib import Path
 from src.errors import BriefingMissingError, ModelUnavailableError
 from src.llm.schema import PlanSchema
 from src.pipeline.consolidator import PipelineResult
+from src.pipeline.runner import FinalCheckUpdate
 from src.repl import (
     Ink,
     ProgressHandler,
     Repl,
+    bare_photo_paths,
     extract_inline_attachments,
     resolve_attachments,
     slugify,
@@ -37,17 +39,24 @@ class FakePipeline:
         warnings: list[str] | None = None,
         raises: Exception | None = None,
         insufficient_brief: bool = False,
+        final_check_update=None,
     ):
         self.calls: list[dict] = []
         self.status = status
         self.warnings = warnings or []
         self.raises = raises
         self.insufficient_brief = insufficient_brief
+        # Симулира стъпка [7] отговаряйки СИНХРОННО, вместо реален фонов thread — виж план 34,
+        # тестовете за on_final_check в test_repl.py/test_tui.py по-долу.
+        self.final_check_update = final_check_update
 
     def __call__(self, post_dir: Path, client, *, force: bool = False, knowledge=None, **kwargs) -> PipelineResult:
         self.calls.append({"post_dir": post_dir, "force": force, "knowledge": knowledge, "mode": kwargs.get("mode")})
         if self.raises is not None:
             raise self.raises
+        on_final_check = kwargs.get("on_final_check")
+        if on_final_check is not None and self.final_check_update is not None:
+            on_final_check(self.final_check_update)
         output_dir = post_dir / "output"
         output_dir.mkdir(parents=True, exist_ok=True)
         (output_dir / "post.md").write_text("Готов пост.\n", encoding="utf-8")
@@ -112,6 +121,11 @@ def make_repl(
         knowledge_loader=make_brand_knowledge,
         client_factory=lambda config: FakeClient(config, plan_notes=plan_notes),
         pipeline_fn=pipeline,
+        # no-op: без него всяко успешно генериране в тестовете би отворило РЕАЛЕН браузър
+        # (виж Repl._generate — автоматично отваряне на preview.html, потребителска заявка
+        # 2026-09-03). clipboard_fn остава реалният по подразбиране — вече установен,
+        # безобиден страничен ефект в тестовете; отварянето на приложение не е.
+        open_preview_fn=lambda path: None,
         today=date(2026, 8, 11),
     )
     return repl, output
@@ -157,6 +171,26 @@ def test_extract_inline_attachments_keeps_unresolvable_token_as_text(tmp_path):
     assert "@всички" in text  # @споменаване в бриф не бива да се яде
     assert str(photo) not in text
     assert unresolved == ["всички"]
+
+def test_bare_photo_paths_resolves_when_every_token_is_a_real_photo(tmp_path):
+    """Провлачен файл директно на промпта (без @ или /attach) — най-интуитивното движение."""
+    a = tmp_path / "a.jpg"
+    b = tmp_path / "b.png"
+    a.write_bytes(b"x")
+    b.write_bytes(b"x")
+
+    assert bare_photo_paths(f'"{a}" "{b}"') == [a, b]
+
+def test_bare_photo_paths_returns_none_when_any_token_is_plain_text(tmp_path):
+    """Ред с истински бриф текст (дори ако едно от думите му случайно е файл) не бива да
+    се третира тихо като прикачване — само ЦЕЛИЯТ ред от разпознаваеми пътища се приема."""
+    photo = tmp_path / "a.jpg"
+    photo.write_bytes(b"x")
+
+    assert bare_photo_paths(f'Ето {photo} от снощи') is None
+
+def test_bare_photo_paths_returns_none_for_empty_line():
+    assert bare_photo_paths("   ") is None
 
 # --------------------------------------------------------------------------- поток
 
@@ -214,6 +248,70 @@ def test_attach_then_brief_uses_attachments_and_clears_them(tmp_path):
     first_dir, second_dir = pipeline.calls[0]["post_dir"], pipeline.calls[1]["post_dir"]
     assert (first_dir / "photos" / "a.jpg").exists()
     assert list((second_dir / "photos").iterdir()) == []  # прикачените не се пренасят към следващия пост
+
+def test_bare_dropped_path_is_attached_without_at_or_attach(tmp_path):
+    """Провлачен файл директно на промпта, без @ отпред и без /attach — трябва да се
+    прикачи мълчаливо, не да мине като (безсмислен) бриф текст."""
+    photo = tmp_path / "екип.jpg"
+    photo.write_bytes(b"x")
+    pipeline = FakePipeline()
+    repl, output = make_repl(tmp_path, pipeline, [f'"{photo}"', "Пост за екипа"])
+
+    repl.run()
+
+    assert len(pipeline.calls) == 1  # само ЕДИН реален пост — пътят не стана отделен бриф
+    post_dir = pipeline.calls[0]["post_dir"]
+    assert (post_dir / "photos" / "екип.jpg").exists()
+    assert any("1 снимка" in line for line in output)
+
+def test_plus_alone_opens_file_picker_and_attaches_selection(tmp_path):
+    """'+' сам на реда отваря диалога за избор на файлове (тук: подменен с fake) —
+    аналог на "+" бутона за прикачване в Claude Code."""
+    photo = tmp_path / "a.jpg"
+    photo.write_bytes(b"x")
+    pipeline = FakePipeline()
+    repl, output = make_repl(tmp_path, pipeline, ["+", "Пост с прикачена снимка"])
+    repl.file_picker_fn = lambda: (str(photo),)
+
+    repl.run()
+
+    post_dir = pipeline.calls[0]["post_dir"]
+    assert (post_dir / "photos" / "a.jpg").exists()
+    assert any("1 снимка" in line for line in output)
+
+def test_pick_command_is_an_alias_for_plus(tmp_path):
+    photo = tmp_path / "a.jpg"
+    photo.write_bytes(b"x")
+    pipeline = FakePipeline()
+    repl, _ = make_repl(tmp_path, pipeline, ["/pick", "Пост с прикачена снимка"])
+    repl.file_picker_fn = lambda: (str(photo),)
+
+    repl.run()
+
+    post_dir = pipeline.calls[0]["post_dir"]
+    assert (post_dir / "photos" / "a.jpg").exists()
+
+def test_plus_with_nothing_selected_attaches_nothing(tmp_path):
+    pipeline = FakePipeline()
+    repl, output = make_repl(tmp_path, pipeline, ["+", "Обикновен бриф без снимки"])
+    repl.file_picker_fn = lambda: ()
+
+    repl.run()
+
+    post_dir = pipeline.calls[0]["post_dir"]
+    assert list((post_dir / "photos").iterdir()) == []
+    assert any("Нищо не е избрано" in line for line in output)
+
+def test_plus_without_available_dialog_points_to_attach(tmp_path):
+    """Среда без графичен интерфейс (file_picker_fn връща None, не празен tuple) —
+    насочва към /attach вместо да чупи сесията."""
+    pipeline = FakePipeline()
+    repl, output = make_repl(tmp_path, pipeline, ["+", "Обикновен бриф без снимки"])
+    repl.file_picker_fn = lambda: None
+
+    repl.run()
+
+    assert any("/attach" in line for line in output)
 
 def test_revise_appends_to_same_briefing_and_forces_rerun(tmp_path):
     pipeline = FakePipeline()
@@ -736,6 +834,44 @@ def test_clipboard_failure_does_not_break_the_session_or_claim_success(tmp_path)
     repl.run()  # не бива да хвърли изключение
 
     assert not any("копирано в клипборда" in line for line in output)
+
+
+def test_late_final_check_notes_are_printed_when_they_arrive(tmp_path):
+    """
+    План 34 — живо тестване на TUI пилота (2026-09-04) показа известното ограничение
+    (async стъпка [7] не се обновява визуално за TUI/REPL) на практика: човек виждаше
+    чисто "✓ ready", докато meta.json на диска вече имаше открита фабрикувана дата.
+    on_final_check затваря тази дупка — REPL печата бележката веднага щом стъпка [7] (тук
+    симулирана синхронно от FakePipeline) отговори.
+    """
+    update = FinalCheckUpdate(post_dir=Path("не-важно"), status="ok", notes=["клише в предложението"])
+    pipeline = FakePipeline(final_check_update=update)
+    repl, output = make_repl(tmp_path, pipeline, ["Бриф"])
+
+    repl.run()
+
+    assert any("async" in line for line in output)
+    assert any("клише в предложението" in line for line in output)  # отделен ред — бележките се изреждат под хедъра
+
+
+def test_late_final_check_with_no_notes_reports_clean(tmp_path):
+    update = FinalCheckUpdate(post_dir=Path("не-важно"), status="ok", notes=[])
+    pipeline = FakePipeline(final_check_update=update)
+    repl, output = make_repl(tmp_path, pipeline, ["Бриф"])
+
+    repl.run()
+
+    assert any("async" in line and "завърши чисто" in line for line in output)
+
+
+def test_late_final_check_failure_is_reported_not_silently_dropped(tmp_path):
+    update = FinalCheckUpdate(post_dir=Path("не-важно"), status="failed", error="модел недостъпен")
+    pipeline = FakePipeline(final_check_update=update)
+    repl, output = make_repl(tmp_path, pipeline, ["Бриф"])
+
+    repl.run()
+
+    assert any("async" in line and "модел недостъпен" in line for line in output)
 
 
 def test_interrupted_run_does_not_attempt_to_copy_an_empty_clipboard(tmp_path):

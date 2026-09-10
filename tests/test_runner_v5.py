@@ -181,6 +181,39 @@ def test_v5_chain_async_final_check_appends_to_meta_json_without_blocking(tmp_pa
         raise AssertionError("Асинхронната [7] проверка не обнови meta.json навреме.")
 
     assert meta["status"] == "ready_with_notes"
+    # research-plan-35-critique-of-plan-34.md (Критика 2): реалната продължителност на
+    # стъпка [7] се записва директно, вместо да се предполага от wall-clock разлики.
+    assert meta["final_check"]["status"] == "ok"
+    assert meta["final_check"]["duration_seconds"] >= 0
+
+
+def test_v5_chain_on_final_check_receives_the_late_notes(tmp_path):
+    """
+    Огледално на test_v3_chain-а в test_runner_verdicts.py (план 34) — v5 споделя
+    `_start_async_final_check` с v3, затова `on_final_check` трябва да работи еднакво и тук.
+    """
+    post_dir = tmp_path / "post"
+    _write_briefing(post_dir)
+    config = make_config(pipeline_chain="v5", writer_candidates=2)
+    client = FakeV5Client(
+        writer=["Кандидат едно.", "Кандидат два."],
+        judge_winners=["B"],
+        config=config,
+        critic_response=CritiqueSchema(verdict=Verdict.NEEDS_REVISION, tone_issues=["звучи административно"]),
+    )
+    updates: list = []
+
+    run_pipeline(post_dir, client, knowledge=make_brand_knowledge(), on_final_check=updates.append)
+
+    for _ in range(50):
+        if updates:
+            break
+        time.sleep(0.1)
+    else:
+        raise AssertionError("on_final_check не беше извикан навреме.")
+
+    assert updates[0].status == "ok"
+    assert any("звучи административно" in note for note in updates[0].notes)
 
 
 def test_v5_chain_excludes_a_forbidden_candidate_before_judge_selects(tmp_path):

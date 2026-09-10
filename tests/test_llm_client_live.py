@@ -18,12 +18,15 @@ posts/2026-08-25-organizirame-godishnata-konferentsiya-digi-2/output/meta.json) 
 
 from __future__ import annotations
 
+import time
+
 import pytest
+import requests
 
 from src.config import ConfigError, load_config
 from src.llm.client import LLMClient
-from src.llm.roles import Role
-from src.llm.schema import PlanSchema
+from src.llm.roles import Role, model_for_role
+from src.llm.schema import PairwiseVerdictSchema, PlanSchema
 
 pytestmark = pytest.mark.live
 
@@ -66,3 +69,98 @@ def test_check_connection_reports_every_configured_role():
 
     failed = {label: info for label, info in results.items() if not info["ok"]}
     assert not failed, f"Неотговорили модели: {failed}"
+
+
+def test_response_format_json_schema_support_and_latency():
+    """
+    Инвестигативен спайк, не production проверка — research-plan-34-speed-quality-second-
+    pass.md (Част 2) / research-plan-35-critique-of-plan-34.md (Критика 3): преди да се
+    добавя `response_format`/`guided_json` в `LLMClient` зад флаг, трябва РЕАЛНО измерване
+    върху конфигурирания бекенд (`chat.velocity.online` към момента на писане), не цитат от
+    външна литература — "near-zero overhead" твърдения там са едностранчиви (виж критиката,
+    "The Hidden Cost of Structured Generation in LLMs" стига до обратен извод в друг контекст).
+
+    Не пипа `LLMClient._post_chat` (той нарочно не поддържа `response_format` още) — вика
+    суровия endpoint директно с `requests.post`, огледално на `_post_chat`, само с добавен
+    `response_format` параметър, за да измери:
+      1. Поддържа ли бекендът параметъра изобщо (приема заявката, връща валиден JSON от
+         първия опит) — важи като печатан резултат за човек, не assert (гърми, ако не се
+         поддържа, е самата информация, не провал на теста).
+      2. Латентност С параметъра срещу латентност БЕЗ него (`client.complete()`, съществуващият
+         path), за да се прецени нетния ефект преди Ред 3б от План 34.
+
+    Резултатите се печатат (`pytest -m live -s -k response_format`) за ръчен преглед — тестът
+    само проверява, че НИТО ЕДИН от двата пътя не гърми неочаквано (мрежова грешка е реален
+    провал; "непознат параметър, игнориран от сървъра" не е — точно затова не е assert върху
+    съдържанието на отговора отвъд валиден JSON).
+    """
+    client = _live_client()
+    config = client.config
+    model = model_for_role(Role.JUDGE, config)
+
+    system = (
+        "Ти си Съдия. Сравни версия A срещу версия B и избери по-добрата. Върни САМО JSON: "
+        '{"winner": "A"|"B", "reasoning": {"opening": "...", "body": "...", '
+        '"highlights": "...", "closing": "..."}, "summary": "едно изречение"}'
+    )
+    prompt = (
+        "Версия A: Клъстерът проведе среща на 5 август с 15 души.\n"
+        "Версия B: Имахме страхотна среща наскоро, беше супер полезно."
+    )
+
+    # --- 1. Базова линия: съществуващият path, БЕЗ response_format ---
+    started = time.monotonic()
+    baseline = client.complete(Role.JUDGE, prompt, system=system, schema=PairwiseVerdictSchema)
+    baseline_seconds = time.monotonic() - started
+    assert isinstance(baseline, PairwiseVerdictSchema)
+    baseline_attempts = client.call_log[-1].attempts
+
+    # --- 2. Същата заявка, РЪЧНО с response_format (JSON Schema на PairwiseVerdictSchema) ---
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": prompt},
+        ],
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "pairwise_verdict",
+                "schema": PairwiseVerdictSchema.model_json_schema(),
+            },
+        },
+    }
+    started = time.monotonic()
+    try:
+        response = requests.post(
+            f"{config.openwebui_base_url}/chat/completions",
+            headers={
+                "Authorization": f"Bearer {config.openwebui_api_key}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=config.request_timeout_seconds,
+        )
+        structured_seconds = time.monotonic() - started
+        structured_supported = response.ok
+        structured_detail = response.text[:300] if not response.ok else "(200 OK)"
+    except requests.RequestException as exc:
+        structured_seconds = time.monotonic() - started
+        structured_supported = False
+        structured_detail = f"{type(exc).__name__}: {exc}"
+
+    # Латинска транслитерация нарочно, не кирилица, и без non-ASCII пунктуация — Windows
+    # конзолата тук е cp1252 по подразбиране (не UTF-8, за разлика от cli.py's
+    # force_utf8_io(), който не се прилага в тестов контекст), а `structured_detail` може да
+    # носи кирилица от самия сървърен отговор при грешка — печатането е диагностика, никога
+    # не бива само то да съсипе теста, ако `sys.stdout` не поддържа някой байт от нея.
+    message = (
+        "\n[response_format spike] "
+        f"baseline: {baseline_seconds:.1f}s, {baseline_attempts} attempt(s) | "
+        f"with response_format: {structured_seconds:.1f}s, supported={structured_supported} "
+        f"({structured_detail})"
+    )
+    try:
+        print(message)
+    except UnicodeEncodeError:
+        print(message.encode("ascii", errors="backslashreplace").decode("ascii"))

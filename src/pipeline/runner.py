@@ -62,7 +62,10 @@ from __future__ import annotations
 
 import dataclasses
 import threading
+import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
@@ -79,6 +82,28 @@ EXAMPLE_BRIEFING_PATH = Path("posts/_example/briefing.md")
 
 SECOND_POST_FILENAME = "post_ii.md"
 FINAL_CRITIQUE_FILENAME = "critique_final.md"
+
+
+@dataclass
+class FinalCheckUpdate:
+    """
+    Резултатът от стъпка [7], предаден на `on_final_check` в МОМЕНТА, в който фоновият
+    daemon thread приключи — за разлика от `_merge_async_notes_into_meta` (записва в
+    output/meta.json на диска), това е нотификация НА ЖИВО за викащия (TUI/REPL), който
+    вече е показал резултата на екрана и може междувременно да е преминал към друг пост.
+
+    Виж research-plan-29 и докстринга на `run_pipeline::wait_for_final_check_seconds` за
+    защо стъпка [7] е async — TUI/REPL не могат да си позволят 70-350+s блокиране на всяко
+    пускане. Проблемът, който `on_final_check` решава: без него намереното от стъпка [7]
+    стигаше само до файла на диска, а човекът, вече гледащ "✓ ready" на екрана, нямаше как
+    да разбере, че междувременно се е появила бележка — освен ако сам провери meta.json.
+    """
+
+    post_dir: Path
+    status: str  # "ok" | "failed" — огледално на meta.json's final_check.status
+    notes: list[str] = field(default_factory=list)
+    resolution_summary: str | None = None
+    error: str | None = None
 
 
 def _resolution_summary(initial_count: int, final_count: int) -> str:
@@ -157,6 +182,7 @@ def run_pipeline(
     mode: str | None = None,
     today: date | None = None,
     wait_for_final_check_seconds: float = 0.0,
+    on_final_check: Callable[[FinalCheckUpdate], None] | None = None,
 ) -> PipelineResult:
     """
     Валидира входа (общо за двете вериги), после разклонява на v3 (подразбиране) или v5
@@ -181,6 +207,13 @@ def run_pipeline(
     беше познатият, документиран компромис). При стойност > 0, `generate` изчаква толкова
     секунди стъпка [7] да завърши, преди да върне резултата — само best-effort: ако не успее
     в срока, продължава без нея (текущото поведение), не увисва безкрайно.
+
+    `on_final_check` (виж research-plan-34 и докстринга на `FinalCheckUpdate`): извиква се
+    от фоновия daemon thread на стъпка [7], В МОМЕНТА, в който тя приключи — независимо
+    колко след като `run_pipeline` вече е върнала резултат. TUI/REPL го подават, за да
+    покажат закъснялата бележка на екрана вместо тя да остане само в meta.json, невидяна
+    без ръчна проверка (документираното ограничение по-горе). CLI `generate` не го подава —
+    там `wait_for_final_check_seconds` вече решава същия проблем синхронно.
     """
     log = setup_run_logger(post_dir)
     mode_obj = modes.get_mode(mode)
@@ -218,6 +251,7 @@ def run_pipeline(
             mode=mode_obj,
             today=today,
             wait_for_final_check_seconds=wait_for_final_check_seconds,
+            on_final_check=on_final_check,
         )
     return _run_pipeline_v3(
         post_dir,
@@ -229,6 +263,7 @@ def run_pipeline(
         mode=mode_obj,
         today=today,
         wait_for_final_check_seconds=wait_for_final_check_seconds,
+        on_final_check=on_final_check,
     )
 
 
@@ -246,6 +281,7 @@ def _run_pipeline_v3(
     mode: modes.PostMode = modes.get_mode(None),
     today: date | None = None,
     wait_for_final_check_seconds: float = 0.0,
+    on_final_check: Callable[[FinalCheckUpdate], None] | None = None,
 ) -> PipelineResult:
     warnings: list[str] = []
     open_notes: list[str] = []
@@ -474,6 +510,18 @@ def _run_pipeline_v3(
         warnings.append(warning_text)
         log.warning(warning_text)
 
+    # research-plan-34-speed-quality-second-pass.md (Част 4): Media Picker досега подбираше
+    # снимки без преценка дали пасват тематично на брифа — открито на живо (хакатон бриф,
+    # избрани общи networking снимки без коментар). open_notes, не warnings — несъответствие
+    # на снимка изисква преглед, не е GDPR-клас задължителна спирачка.
+    for item in media_selection.selected:
+        if item.topical_mismatch:
+            reason_suffix = f": {item.mismatch_reason}" if item.mismatch_reason else ""
+            open_notes.append(
+                f"Media Picker флагна '{item.filename}' като вероятно несъответстваща тематично "
+                f"на брифа{reason_suffix} — прегледайте дали снимката пасва."
+            )
+
     if plan.insufficient_brief:
         open_notes.append(
             "Брифът изглежда без достатъчно съдържание за пост — Критик/Post II бяха "
@@ -540,7 +588,9 @@ def _run_pipeline_v3(
         log.info("[7] Пропусната — брифът е маркиран от Планера като недостатъчен/със забранена тема (виж [4]-[6]).")
     else:
         log.info("[7] Критик върху предложението (async, информативно)...")
-        thread = _start_async_final_check(post_dir, client, knowledge, plan, briefing_text, official_text, findings=findings)
+        thread = _start_async_final_check(
+            post_dir, client, knowledge, plan, briefing_text, official_text, findings=findings, on_final_check=on_final_check
+        )
         if wait_for_final_check_seconds > 0:
             result = _await_final_check(thread, post_dir, result, wait_for_final_check_seconds, log)
 
@@ -561,6 +611,7 @@ def _run_pipeline_v5(
     mode: modes.PostMode = modes.get_mode(None),
     today: date | None = None,
     wait_for_final_check_seconds: float = 0.0,
+    on_final_check: Callable[[FinalCheckUpdate], None] | None = None,
 ) -> PipelineResult:
     """
     Виж докстринга на модула за схемата. Разлика от v3, накратко: няма Post II/Консолидатор
@@ -683,6 +734,18 @@ def _run_pipeline_v5(
         warnings.append(warning_text)
         log.warning(warning_text)
 
+    # research-plan-34-speed-quality-second-pass.md (Част 4): Media Picker досега подбираше
+    # снимки без преценка дали пасват тематично на брифа — открито на живо (хакатон бриф,
+    # избрани общи networking снимки без коментар). open_notes, не warnings — несъответствие
+    # на снимка изисква преглед, не е GDPR-клас задължителна спирачка.
+    for item in media_selection.selected:
+        if item.topical_mismatch:
+            reason_suffix = f": {item.mismatch_reason}" if item.mismatch_reason else ""
+            open_notes.append(
+                f"Media Picker флагна '{item.filename}' като вероятно несъответстваща тематично "
+                f"на брифа{reason_suffix} — прегледайте дали снимката пасва."
+            )
+
     if plan.is_sensitive:
         open_notes.append(
             "ЧУВСТВИТЕЛНА ТЕМА — Планерът прецени, че тя изисква преглед и одобрение преди "
@@ -713,7 +776,9 @@ def _run_pipeline_v5(
     # [7] Финален критик — АСИНХРОННО (план 15, Част 4/1.1: тази стъпка сама изяжда ~70s в
     # v3, без да променя изхода — чисто информативна и там). Виж _start_async_final_check
     # защо не пише през споделения logger.
-    thread = _start_async_final_check(post_dir, client, knowledge, plan, briefing_text, official_text)
+    thread = _start_async_final_check(
+        post_dir, client, knowledge, plan, briefing_text, official_text, on_final_check=on_final_check
+    )
     if wait_for_final_check_seconds > 0:
         result = _await_final_check(thread, post_dir, result, wait_for_final_check_seconds, log)
 
@@ -721,12 +786,27 @@ def _run_pipeline_v5(
 
 
 def _start_async_final_check(
-    post_dir, client, knowledge, plan, briefing_text, official_text, *, findings: list[str] | None = None
+    post_dir,
+    client,
+    knowledge,
+    plan,
+    briefing_text,
+    official_text,
+    *,
+    findings: list[str] | None = None,
+    on_final_check: Callable[[FinalCheckUpdate], None] | None = None,
 ) -> threading.Thread:
     """
     Стъпка [7], извън критичния път — тече във фонов daemon thread, за да не блокира вече
     показания на човека резултат. Споделена между v3 и v5 (v3 я вика с `findings`, за да
     получи и resolution_summary — план 13; v5 не подава findings, само бележките).
+
+    `on_final_check`: извикан в края на `_worker()`, СЛЕД `_merge_async_notes_into_meta` —
+    диска се обновява първо, викането на callback-а е допълнително, никога заместващо.
+    Обвито в try/except: счупен callback (грешка в TUI/REPL кода на викащия) не бива да
+    заличи вече записаното в meta.json, нито да остави необработено изключение в daemon
+    thread, което Python просто мълчаливо изяжда (виж стандартната библиотека) — по-добре
+    явен ред в run.log, отколкото тих провал без следа.
 
     НЕ използва logging.getLogger(LOGGER_NAME) (src/logging_utils.py): setup_run_logger()
     чисти handler-ите на ВСЕКИ извикване, а ако междувременно потребителят пусне НОВ пост
@@ -740,8 +820,17 @@ def _start_async_final_check(
     заради стъпка, чийто резултат вече е показан.
     """
 
+    def _notify(update: FinalCheckUpdate) -> None:
+        if on_final_check is None:
+            return
+        try:
+            on_final_check(update)
+        except Exception as exc:
+            _append_run_log(post_dir / "run.log", f"[7] on_final_check се счупи: {type(exc).__name__}: {exc}")
+
     def _worker() -> None:
         log_path = post_dir / "run.log"
+        started = time.monotonic()
         try:
             _append_run_log(log_path, "[7] Финален критик (async, информативно)...")
             final_critique = critic.run(
@@ -767,22 +856,41 @@ def _start_async_final_check(
                 resolution_summary = _resolution_summary(len(findings), len(final_notes))
                 _append_run_log(log_path, f"[7] {resolution_summary}")
 
+            duration_seconds = round(time.monotonic() - started, 2)
             _merge_async_notes_into_meta(
-                post_dir, final_notes, resolution_summary=resolution_summary, final_check={"status": "ok"}
+                post_dir,
+                final_notes,
+                resolution_summary=resolution_summary,
+                final_check={"status": "ok", "duration_seconds": duration_seconds},
+            )
+            _notify(
+                FinalCheckUpdate(
+                    post_dir=post_dir, status="ok", notes=final_notes, resolution_summary=resolution_summary
+                )
             )
         except AgentError as exc:
+            duration_seconds = round(time.monotonic() - started, 2)
             _append_run_log(log_path, f"[7] Финалната проверка (async) се счупи: {exc.human_message}")
             _merge_async_notes_into_meta(
-                post_dir, [], final_check={"status": "failed", "error": exc.human_message}
+                post_dir,
+                [],
+                final_check={"status": "failed", "error": exc.human_message, "duration_seconds": duration_seconds},
             )
+            _notify(FinalCheckUpdate(post_dir=post_dir, status="failed", error=exc.human_message))
         except Exception as exc:
             # Живо тестване (план 17, А5) хвана AttributeError от развален JSON парсинг —
             # преди тук минаваше суров traceback в конзолата на потребителя и стъпка [7]
             # оставаше без никаква следа в meta.json. Резюме, не пълен traceback — виж
             # докстринга на _append_run_log защо тук няма [ERROR] ниво.
+            duration_seconds = round(time.monotonic() - started, 2)
             error_summary = f"{type(exc).__name__}: {exc}"
             _append_run_log(log_path, f"[7] Финалната проверка (async) се счупи неочаквано: {error_summary}")
-            _merge_async_notes_into_meta(post_dir, [], final_check={"status": "failed", "error": error_summary})
+            _merge_async_notes_into_meta(
+                post_dir,
+                [],
+                final_check={"status": "failed", "error": error_summary, "duration_seconds": duration_seconds},
+            )
+            _notify(FinalCheckUpdate(post_dir=post_dir, status="failed", error=error_summary))
 
     thread = threading.Thread(target=_worker, daemon=True, name=f"final-check-{post_dir.name}")
     thread.start()
@@ -853,7 +961,10 @@ def _merge_async_notes_into_meta(
     `final_check` (виж research-plan-18-critique-of-plan-17.md, А5): явен статус на стъпка
     [7] — {"status": "ok"} или {"status": "failed", "error": "..."}. Записва се дори при
     0 находки, за да различи "проверих, чисто е" от "не успях да проверя" (иначе двете
-    изглеждат еднакво отвън — липса на нова бележка).
+    изглеждат еднакво отвън — липса на нова бележка). От research-plan-35-critique-of-plan-34.md
+    (Критика 2) носи и `"duration_seconds"` — реалната продължителност на стъпка [7], измерена
+    директно в `_worker()`, вместо да се предполага от разлика в wall-clock часовници между
+    отделни пускания (ненадеждно — маскирано от паралелизма между Писателя и Media Picker).
     """
     meta_path = post_dir / "output" / "meta.json"
     if not meta_path.exists() or (not final_notes and resolution_summary is None and final_check is None):

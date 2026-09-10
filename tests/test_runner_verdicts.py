@@ -418,7 +418,75 @@ def test_successful_final_check_records_ok_status(tmp_path):
     run_pipeline(post_dir, client, knowledge=make_brand_knowledge())
     meta = _wait_for_async_final_check(post_dir)
 
-    assert meta["final_check"] == {"status": "ok"}
+    # research-plan-35-critique-of-plan-34.md (Критика 2): реалната продължителност на
+    # стъпка [7] се записва директно — измерена в _worker(), не предположена от wall-clock
+    # разлики между отделни пускания (ненадеждно, виж критиката).
+    assert meta["final_check"]["status"] == "ok"
+    assert meta["final_check"]["duration_seconds"] >= 0
+
+# --------------------------------------------------------------- on_final_check (план 34)
+#
+# TUI/REPL не подават wait_for_final_check_seconds (виж докстринга му по-горе) — резултатът
+# на екрана може вече да показва "✓ ready", докато стъпка [7] още тече във фонов thread.
+# `on_final_check` е нотификацията НА ЖИВО, извикана от самия thread, когато той приключи —
+# TUI/REPL я ползват, за да покажат закъснялата бележка, вместо тя да остане невидяна в
+# meta.json (виж research-plan-34, живо тестване на TUI пилота, 2026-09-04).
+
+def test_on_final_check_is_called_with_the_notes_when_step_seven_succeeds(tmp_path):
+    post_dir = tmp_path / "post"
+    _write_briefing(post_dir)
+    client = make_client(
+        writer=["Пост I с клише.", "Пост II без клише."],
+        critic=[tone_critique("клише"), tone_critique("клише в предложението")],
+        consolidator=["Предложение."],
+    )
+    updates: list = []
+
+    run_pipeline(post_dir, client, knowledge=make_brand_knowledge(), on_final_check=updates.append)
+    _wait_for_async_final_check(post_dir)
+
+    assert len(updates) == 1
+    update = updates[0]
+    assert update.post_dir == post_dir
+    assert update.status == "ok"
+    assert any("клише в предложението" in note for note in update.notes)
+    assert update.resolution_summary is not None
+
+def test_on_final_check_is_called_with_the_error_when_step_seven_fails(tmp_path):
+    post_dir = tmp_path / "post"
+    _write_briefing(post_dir)
+    client = make_client(
+        writer=["Пост I.", "Пост II."],
+        critic=[tone_critique("клише"), ModelUnavailableError("critic", "m", 3)],
+        consolidator=["Предложение."],
+    )
+    updates: list = []
+
+    run_pipeline(post_dir, client, knowledge=make_brand_knowledge(), on_final_check=updates.append)
+    _wait_for_async_final_check(post_dir)
+
+    assert len(updates) == 1
+    assert updates[0].status == "failed"
+    assert updates[0].error is not None
+    assert updates[0].notes == []
+
+def test_broken_on_final_check_callback_does_not_stop_meta_json_from_being_written(tmp_path):
+    """
+    `on_final_check` е чужд код (TUI/REPL) — грешка в него не бива да заличи вече записаното
+    в meta.json, нито да остави необработено изключение в daemon thread-а на стъпка [7].
+    """
+    post_dir = tmp_path / "post"
+    _write_briefing(post_dir)
+    client = make_client(writer=["Пост."], critic=[CLEAN_CRITIQUE, CLEAN_CRITIQUE], consolidator=["Пост."])
+
+    def broken_callback(update):
+        raise RuntimeError("счупен TUI callback")
+
+    run_pipeline(post_dir, client, knowledge=make_brand_knowledge(), on_final_check=broken_callback)
+    meta = _wait_for_async_final_check(post_dir)
+
+    assert meta["final_check"]["status"] == "ok"
+    assert "on_final_check се счупи" in (post_dir / "run.log").read_text(encoding="utf-8")
 
 # --------------------------------------------------------------- wait_for_final_check_seconds (план 29)
 
@@ -681,6 +749,69 @@ def test_possible_minor_photo_is_a_warning_not_a_stopping_condition(tmp_path):
     assert result.status == "ready_with_notes"
     assert any("непълнолетни" in w for w in result.warnings)
     assert result.post_path.exists()
+
+
+def test_topical_mismatch_photo_is_an_open_note_not_a_warning(tmp_path):
+    """
+    research-plan-34-speed-quality-second-pass.md (Част 4) / research-plan-35-critique-of-
+    plan-34.md (Критика 5): Media Picker флагва снимка, която не пасва тематично на брифа
+    (открито на живо — хакатон бриф, избрани общи networking снимки без коментар).
+    open_notes, не warnings — изисква преглед, не е GDPR-клас задължителна спирачка.
+    """
+    post_dir = tmp_path / "post"
+    _write_briefing(post_dir)
+    photos_dir = post_dir / "photos"
+    photos_dir.mkdir()
+    (photos_dir / "a.jpg").write_bytes(b"fake-jpeg-bytes")
+    client = make_client(
+        writer=["Готов текст."],
+        critic=[CLEAN_CRITIQUE, CLEAN_CRITIQUE],
+        consolidator=["Готов текст."],
+        media=MediaSelectionSchema(
+            selected=[
+                MediaSelectionItem(
+                    filename="a.jpg",
+                    reason="единствената налична снимка",
+                    topical_mismatch=True,
+                    mismatch_reason="обща снимка от networking, без връзка с повода",
+                )
+            ]
+        ),
+    )
+
+    result = run_pipeline(post_dir, client, knowledge=make_brand_knowledge())
+
+    assert result.status == "ready_with_notes"
+    assert any("несъответстваща тематично" in n and "networking" in n for n in result.open_notes)
+    assert result.warnings == []
+
+
+def test_media_selection_backward_compatible_without_new_optional_fields(tmp_path):
+    """
+    Критика 5: полетата са незадължителни (`| None`, подразбиране None) точно за да не
+    въведат риск от InvalidResponseError/поправящ retry при модел, който не ги попълни.
+    Симулира JSON отговор БЕЗ topical_mismatch/mismatch_reason изобщо — трябва да парсне
+    валидно и да не остави никаква бележка.
+    """
+    post_dir = tmp_path / "post"
+    _write_briefing(post_dir)
+    photos_dir = post_dir / "photos"
+    photos_dir.mkdir()
+    (photos_dir / "a.jpg").write_bytes(b"fake-jpeg-bytes")
+    client = make_client(
+        writer=["Готов текст."],
+        critic=[CLEAN_CRITIQUE, CLEAN_CRITIQUE],
+        consolidator=["Готов текст."],
+        media=MediaSelectionSchema(
+            selected=[MediaSelectionItem(filename="a.jpg", reason="показва момента")]
+        ),
+    )
+
+    result = run_pipeline(post_dir, client, knowledge=make_brand_knowledge())
+
+    assert result.status == "ready"
+    assert result.open_notes == []
+    assert result.warnings == []
 
 
 # --------------------------------------------------------------- дължина под минимума (2026-08-17)

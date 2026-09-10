@@ -57,17 +57,33 @@ _TEMPLATE = """\
   .meta-bar {{ display: flex; gap: 16px; padding: 10px 16px; border-top: 1px solid #eee; color: #666; font-size: 13px; }}
   h1 {{ max-width: 560px; margin: 0 auto 16px; font-size: 18px; }}
   .status {{
-    max-width: 560px; margin: 0 auto 16px; padding: 12px 16px; border-radius: 6px; font-size: 13px;
+    max-width: 560px; margin: 0 auto 16px; padding: 14px 18px; border-radius: 6px;
+    font-size: 15px; font-weight: 600; display: flex; align-items: center; justify-content: space-between;
+    gap: 12px; flex-wrap: wrap;
   }}
-  .status.ready {{ background: #e7f6ec; color: #146c2e; }}
-  .status.ready_with_notes {{ background: #fff6e0; color: #8a5a00; }}
-  .notes {{ max-width: 560px; margin: 0 auto 24px; font-size: 13px; color: #555; }}
+  .status.ready {{ background: #e7f6ec; color: #146c2e; border: 1px solid #b7e4c7; }}
+  .status.ready_with_notes {{ background: #fff6e0; color: #8a5a00; border: 1px solid #f2d68a; }}
+  .copy-btn {{
+    font: inherit; font-size: 14px; font-weight: 600; cursor: pointer;
+    border: 1px solid #0a66c2; background: #0a66c2; color: #fff; border-radius: 20px;
+    padding: 8px 18px; white-space: nowrap;
+  }}
+  .copy-btn:hover {{ background: #004182; border-color: #004182; }}
+  .copy-btn.copied {{ background: #146c2e; border-color: #146c2e; }}
+  .notes {{
+    max-width: 560px; margin: 0 auto 24px; font-size: 13px; color: #444; background: #fff6e0;
+    border: 1px solid #f2d68a; border-radius: 6px; padding: 14px 18px 14px 34px;
+  }}
+  .notes-title {{ font-weight: 700; color: #8a5a00; margin: 0 0 8px -18px; font-size: 13px; }}
   .notes li {{ margin-bottom: 6px; }}
 </style>
 </head>
 <body>
   <h1>Преглед на пост — {title}</h1>
-  <div class="status {status_class}">Статус: <b>{status}</b> · {n_notes} открит(и) въпрос(а) · {n_warnings} предупреждение(я)</div>
+  <div class="status {status_class}">
+    <span>Статус: <b>{status}</b> · {n_notes} открит(и) въпрос(а) · {n_warnings} предупреждение(я)</span>
+    <button class="copy-btn" id="copy-btn" onclick="copyPostText()">📋 Копирай текста</button>
+  </div>
 
   <div class="card">
     <div class="card-head">
@@ -77,12 +93,38 @@ _TEMPLATE = """\
         <span>Спонсорирано · 🌐</span>
       </div>
     </div>
-    <div class="post-text">{post_html}</div>
+    <div class="post-text" id="post-text">{post_html}</div>
     {photos_html}
     <div class="meta-bar">👍 Харесай &nbsp; 💬 Коментирай &nbsp; ↗ Сподели</div>
   </div>
 
   {notes_html}
+
+  <script>
+    function copyPostText() {{
+      var el = document.getElementById('post-text');
+      var text = el.innerText || el.textContent;
+      var ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      var ok = false;
+      try {{ ok = document.execCommand('copy'); }} catch (e) {{ ok = false; }}
+      document.body.removeChild(ta);
+      var btn = document.getElementById('copy-btn');
+      if (ok) {{
+        var original = btn.textContent;
+        btn.textContent = '✓ Копирано!';
+        btn.classList.add('copied');
+        setTimeout(function () {{ btn.textContent = original; btn.classList.remove('copied'); }}, 1500);
+      }} else {{
+        alert('Копирането не успя автоматично — маркирай текста на поста ръчно.');
+      }}
+    }}
+  </script>
 </body>
 </html>
 """
@@ -119,7 +161,12 @@ def render_preview(post_dir: Path) -> Path:
     open_notes = meta.get("open_notes", [])
     warnings = meta.get("warnings", [])
     notes_items = "".join(f"<li>{html.escape(n)}</li>" for n in (open_notes + warnings))
-    notes_html = f"<ul class='notes'>{notes_items}</ul>" if notes_items else ""
+    notes_html = (
+        f"<div class='notes'><p class='notes-title'>⚠ За преглед преди публикуване:</p>"
+        f"<ul>{notes_items}</ul></div>"
+        if notes_items
+        else ""
+    )
 
     status = meta.get("status", "?")
     rendered = _TEMPLATE.format(

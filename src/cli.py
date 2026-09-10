@@ -37,6 +37,7 @@ from __future__ import annotations
 import argparse
 import shutil
 import sys
+import webbrowser
 from pathlib import Path
 
 from src.brand.loader import audit_knowledge
@@ -120,6 +121,14 @@ def cmd_generate(args: argparse.Namespace) -> int:
     try:
         preview_path = render_preview(post_dir)
         print(f"  преглед: {file_uri(preview_path)}")
+        # Автоматично отваряне в браузъра (потребителска обратна връзка 2026-09-03: "не се
+        # отваря директно в браузъра", преглед само на разположение като линк за ръчно
+        # копиране). Best-effort — среда без графичен браузър (сървър, cron) не бива да
+        # чупи вече успешния резултат.
+        try:
+            webbrowser.open(file_uri(preview_path))
+        except Exception:
+            pass
     except (FileNotFoundError, OSError) as exc:
         print(f"  ⚠ Прегледът не се генерира: {exc}")
 

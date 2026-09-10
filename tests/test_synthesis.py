@@ -265,3 +265,40 @@ def test_finalize_copies_selected_photos_and_reports_missing(tmp_path):
     assert (tmp_path / "output" / "selected" / "a.jpg").exists()
     assert meta["photos"]["selected"] == ["a.jpg"]
     assert meta["photos"]["missing_referenced_by_media_picker"] == ["b.jpg"]
+
+
+def test_finalize_matches_photo_despite_unicode_normalization_mismatch(tmp_path):
+    """
+    Регресионен тест за реален бъг от жива продукция (2026-09-03): файл на диска с ударено
+    "e" в decomposed форма (NFD — буквата "e" плюс отделен combining acute accent, U+0301)
+    не съвпадаше с името, върнато от Media Picker в composed форма (NFC — единичен
+    codepoint U+00E9). Двата низа изглеждат ИДЕНТИЧНО на екран, но обикновен
+    Path(...).exists() гърми на False — снимката отиваше в "missing", постът излизаше с
+    1 снимка вместо 2, без видима причина.
+
+    Изрични \\uXXXX escape-и по-долу, не типирано ударено "e" в изходния код —
+    гарантира че двата низа СА различни codepoint последователности, не
+    случайно нормализирани до едно и също нещо някъде по пътя.
+    """
+    photos = tmp_path / "photos"
+    photos.mkdir()
+    decomposed_name = "identit" + "e\u0301" + ".jpg"  # NFD: "e" + combining acute accent
+    composed_name = "identit" + "\u00e9" + ".jpg"  # NFC: single codepoint
+    assert composed_name != decomposed_name  # доказва, че наистина са различни байтове
+    (photos / decomposed_name).write_bytes(b"x")
+
+    selection = MediaSelectionSchema.model_validate({"selected": [{"filename": composed_name, "reason": "ok"}]})
+
+    consolidator.finalize(
+        tmp_path,
+        RecordingClient(),
+        PLAN,
+        selection,
+        no_photos=False,
+        status="ready",
+    )
+
+    meta = json.loads((tmp_path / "output" / "meta.json").read_text(encoding="utf-8"))
+    assert meta["photos"]["missing_referenced_by_media_picker"] == []
+    assert meta["photos"]["selected"] == [decomposed_name]
+    assert (tmp_path / "output" / "selected" / decomposed_name).exists()

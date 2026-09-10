@@ -11,6 +11,7 @@ from pathlib import Path
 
 from src.errors import AgentError
 from src.pipeline.consolidator import PipelineResult
+from src.pipeline.runner import FinalCheckUpdate
 from src.tui import AgentTUI
 from tests.conftest import make_brand_knowledge, make_config
 
@@ -18,15 +19,21 @@ from tests.conftest import make_brand_knowledge, make_config
 class FakePipeline:
     """Записва извикванията и пише output/post.md — огледално на test_repl.py::FakePipeline."""
 
-    def __init__(self, *, status: str = "ready", raises: Exception | None = None):
+    def __init__(self, *, status: str = "ready", raises: Exception | None = None, final_check_update=None):
         self.calls: list[dict] = []
         self.status = status
         self.raises = raises
+        # Симулира стъпка [7] отговаряйки СИНХРОННО (в същия worker thread), вместо реален
+        # фонов daemon thread — виж план 34, тестовете за on_final_check по-долу.
+        self.final_check_update = final_check_update
 
     def __call__(self, post_dir: Path, client, *, force: bool = False, knowledge=None, **kwargs) -> PipelineResult:
         self.calls.append({"post_dir": post_dir, "force": force, "knowledge": knowledge, "mode": kwargs.get("mode")})
         if self.raises is not None:
             raise self.raises
+        on_final_check = kwargs.get("on_final_check")
+        if on_final_check is not None and self.final_check_update is not None:
+            on_final_check(self.final_check_update)
         output_dir = post_dir / "output"
         output_dir.mkdir(parents=True, exist_ok=True)
         (output_dir / "post.md").write_text("Готов пост от TUI теста.\n", encoding="utf-8")
@@ -44,13 +51,21 @@ class FakeClient:
         self.call_log: list = []
 
 
-def make_app(tmp_path: Path, pipeline: FakePipeline) -> AgentTUI:
+def make_app(tmp_path: Path, pipeline: FakePipeline, *, file_picker_fn=None) -> AgentTUI:
+    kwargs = {}
+    if file_picker_fn is not None:
+        kwargs["file_picker_fn"] = file_picker_fn
     return AgentTUI(
         posts_dir=tmp_path / "posts",
         config_loader=make_config,
         knowledge_loader=make_brand_knowledge,
         client_factory=FakeClient,
         pipeline_fn=pipeline,
+        # no-op: без него всяко успешно генериране в тестовете би отворило РЕАЛЕН браузър
+        # (виж AgentTUI._show_result — автоматично отваряне на preview.html, потребителска
+        # заявка 2026-09-03).
+        open_preview_fn=lambda path: None,
+        **kwargs,
     )
 
 
@@ -107,6 +122,78 @@ def test_submitting_a_brief_runs_the_pipeline_and_shows_the_post(tmp_path):
     run(scenario())
 
 
+def test_attach_button_picks_photos_and_copies_them_into_the_post(tmp_path):
+    """
+    "📎 Прикачи снимки" — истинска кликаема икона с мишка (потребителска заявка,
+    2026-09-02: "искам да е там като иконка и при натискане да прикачвам снимки"),
+    аналог на бутона в src/repl.py, чрез инжектиран file_picker_fn (виж make_app).
+    """
+    photo = tmp_path / "a.jpg"
+    photo.write_bytes(b"x")
+    pipeline = FakePipeline()
+    app = make_app(tmp_path, pipeline, file_picker_fn=lambda: (str(photo),))
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            await pilot.click("#attach-button")
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+            status = app.query_one("#attach-status")
+            assert "1 снимка" in str(status.content)
+
+            await pilot.click("#brief")
+            await pilot.press(*"Пост с прикачена снимка")
+            await pilot.press("enter")
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+            post_dir = pipeline.calls[0]["post_dir"]
+            assert (post_dir / "photos" / "a.jpg").exists()
+            # изчистено след изпращане — не се пренася към следващ пост
+            assert "снимка" not in str(app.query_one("#attach-status").content)
+
+    run(scenario())
+
+
+def test_attach_button_with_nothing_selected_stays_quiet(tmp_path):
+    app = make_app(tmp_path, FakePipeline(), file_picker_fn=lambda: ())
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            await pilot.click("#attach-button")
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+            assert str(app.query_one("#attach-status").content) == ""
+            log = app.query_one("#log")
+            text = "\n".join(str(line) for line in log.lines)
+            assert "не е наличен" not in text
+
+    run(scenario())
+
+
+def test_attach_button_without_available_dialog_points_to_the_issue(tmp_path):
+    """Среда без графичен интерфейс (file_picker_fn връща None) — ясно съобщение в лога,
+    не тихо мълчание и не срив на приложението."""
+    app = make_app(tmp_path, FakePipeline(), file_picker_fn=lambda: None)
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            await pilot.click("#attach-button")
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+            log = app.query_one("#log")
+            text = "\n".join(str(line) for line in log.lines)
+            assert "не е наличен" in text
+
+    run(scenario())
+
+
 def test_mode_command_switches_mode_and_is_passed_to_the_pipeline(tmp_path):
     async def scenario():
         pipeline = FakePipeline()
@@ -154,5 +241,53 @@ def test_agent_error_is_shown_without_crashing(tmp_path):
             assert "детайл" in text
             # входът трябва да се отключи пак след грешка, не да остане заключен
             assert app.query_one("#brief").disabled is False
+
+    run(scenario())
+
+
+def test_late_final_check_notes_are_shown_in_the_log(tmp_path):
+    """
+    План 34 — живо тестване на TUI пилота (2026-09-04) потвърди на практика известното
+    ограничение (async стъпка [7] не се обновява визуално): екранът показваше чисто
+    "✓ ready", докато meta.json на диска вече имаше открита фабрикувана дата. on_final_check
+    затваря дупката — тук FakePipeline я симулира синхронно, вместо реален фонов thread.
+    """
+    async def scenario():
+        update = FinalCheckUpdate(post_dir=Path("не-важно"), status="ok", notes=["клише в предложението"])
+        pipeline = FakePipeline(final_check_update=update)
+        app = make_app(tmp_path, pipeline)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            await pilot.click("#brief")
+            await pilot.press(*"Събитие")
+            await pilot.press("enter")
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+            log = app.query_one("#log")
+            text = "\n".join(str(line) for line in log.lines)
+            assert "async" in text
+            assert "клише в предложението" in text
+
+    run(scenario())
+
+
+def test_late_final_check_failure_is_shown_not_silently_dropped(tmp_path):
+    async def scenario():
+        update = FinalCheckUpdate(post_dir=Path("не-важно"), status="failed", error="модел недостъпен")
+        pipeline = FakePipeline(final_check_update=update)
+        app = make_app(tmp_path, pipeline)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            await pilot.click("#brief")
+            await pilot.press(*"Събитие")
+            await pilot.press("enter")
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+            log = app.query_one("#log")
+            text = "\n".join(str(line) for line in log.lines)
+            assert "async" in text
+            assert "модел недостъпен" in text
 
     run(scenario())

@@ -88,7 +88,10 @@ def _strip_disallowed_emoji(text: str, rules: FormatRules, fixes: list[str]) -> 
         return text
     unique = list(dict.fromkeys(disallowed))
     for char in unique:
-        text = text.replace(char, "")
+        # Маха и следващия U+FE0F (variation selector), ако има такъв — иначе емоджи,
+        # написано като база+VS16 (напр. 🗓️, 👁️), оставя невидим "призрачен" символ
+        # след премахването на базата. Реален случай от живо тестване (2026-09-04).
+        text = text.replace(char + chr(0xFE0F), "").replace(char, "")
     fixes.append(
         f"Премахнати неразрешени емоджи ({' '.join(unique)}) — разрешените в "
         f"knowledge/voice/ са {' '.join(sorted(rules.allowed_emoji))}."
@@ -114,7 +117,10 @@ def _trim_excess_emoji(text: str, rules: FormatRules, fixes: list[str]) -> str:
             break
         index = text.rfind(char)
         if index != -1:
-            text = text[:index] + text[index + len(char) :]
+            end = index + len(char)
+            if text[end : end + 1] == chr(0xFE0F):
+                end += 1  # маха и оставения "призрачен" variation selector, виж _strip_disallowed_emoji
+            text = text[:index] + text[end:]
             removed.append(char)
             excess -= 1
     fixes.append(
@@ -648,6 +654,85 @@ def _flag_foreign_script(text: str, notes: list[str]) -> None:
         )
 
 
+_BRACKET_PLACEHOLDER_RE = re.compile(r"\[[^\]\[\n]{1,60}\]")
+
+
+def _flag_bracket_placeholder(text: str, notes: list[str]) -> None:
+    """
+    Флагва скоба-плейсхолдър, оцелял в текста (напр. "[дата]", "[място]", "[ИМЕ И
+    ДЛЪЖНОСТ]") — реален бъг от живо тестване (2026-09-04, TUI Pilot тест с реални снимки
+    от Downloads): бриф "Малко зад кулисите от снощната среща" (без дата/място) произведе
+    буквално "На [дата] се проведе... в [място]." в готовия текст. Писателят вече е
+    изрично инструктиран да пропуска липсващия детайл, не да го маркира с плейсхолдър (виж
+    writer.py) — това тук е механичен бекъп за случаите, в които моделът все пак го напише.
+
+    Само флагва, НЕ пипа текста: за разлика от "[линк]" (_strip_placeholder_closing по-горе,
+    винаги в затваряща формула, безопасно за цяло изречение), скоба тук може да е сред
+    изречението ("На [дата] се проведе... в [място]") — механично премахване без контекст
+    би оставило граматически счупен текст ("На  се проведе... в ."), по-лошо от бележката.
+    """
+    matches = _BRACKET_PLACEHOLDER_RE.findall(text)
+    if matches:
+        shown = ", ".join(f'"{m}"' for m in dict.fromkeys(matches))
+        notes.append(
+            f"Открит е скоба-плейсхолдър в текста ({shown}) — моделът е оставил липсваща "
+            f"информация неизпълнена, вместо да преформулира изречението без нея. "
+            f"Прегледайте и пренапишете ръчно преди публикуване."
+        )
+
+
+_WALL_OF_TEXT_WORD_THRESHOLD = 80
+
+
+def _flag_wall_of_text(text: str, notes: list[str]) -> None:
+    """
+    Флагва пост, събран в ЕДИН неразделен абзац — реален случай от жива продукция
+    (2026-09-03): Post I и Post II имаха ясно разделени абзаци (и по 2 емоджита всяка),
+    но Консолидаторът ги сля в единичен блок от над 170 думи без нито един празен ред и
+    без нито едно емоджи — нищо, посочено от Критика, не обясняваше премахването им.
+    Механичен бекъп, независим от промпт инструкцията към Консолидатора: не пипа текста
+    (не е ясно КЪДЕ точно трябва да мине разделянето), само предупреждава.
+
+    Прагът е нарочно висок (над честния минимум за тънък бриф) — кратък, честно
+    едноабзацен пост (напр. 40-думен отговор на изрично тънък бриф) не бива да се флагва.
+    """
+    paragraphs = [p for p in text.split("\n\n") if p.strip()]
+    if len(paragraphs) <= 1 and count_words(text) > _WALL_OF_TEXT_WORD_THRESHOLD:
+        notes.append(
+            f"Постът е един неразделен абзац от над {_WALL_OF_TEXT_WORD_THRESHOLD} думи, "
+            "без нито един празен ред между отделните идеи. LinkedIn постове се четат "
+            "по-лесно разделени на кратки абзаци — прегледайте дали текстът не трябва да "
+            "се раздели (напр. отваряне / съдържание / благодарност / затваряне)."
+        )
+
+
+_ORPHAN_OPENING_FRAGMENT_RE = re.compile(r"^([А-ЯЁ][А-Яа-яЁё]{0,18})\.\s+[А-ЯЁ]")
+
+
+def _flag_orphan_opening_fragment(text: str, notes: list[str]) -> None:
+    """
+    Флагва изречение-фрагмент в самото начало на поста, несвързан граматически с това, което
+    следва (напр. "Варна. ИКТ Клъстер разшири..."). Реален бъг от жива продукция (TUI полеви
+    тест, 2026-09-10, бриф "Имаме нов партньор."): Консолидаторът, опитвайки се да удовлетвори
+    правилото "отваряй с факт/място" (виж _opening_has_a_fact по-долу), залепи самотна дума
+    в началото, без да я свърже граматически с остатъка — post_i.md (суровата чернова на
+    Писателя) нямаше този проблем, той се появи конкретно при синтеза.
+
+    Механичен бекъп, независим от промпт инструкцията към Консолидатора (виж
+    MERGE_SYSTEM_PROMPT в consolidator.py) — не пипа текста (несигурно КАК точно да се
+    преформулира граматически, за разлика от _strip_disallowed_emoji и др., които просто
+    махат символ), само предупреждава.
+    """
+    first_line = next((line for line in text.splitlines() if line.strip()), "")
+    match = _ORPHAN_OPENING_FRAGMENT_RE.match(first_line.strip())
+    if match:
+        notes.append(
+            f'Постът отваря с изолиран фрагмент ("{match.group(1)}.") преди истинското '
+            f"изречение — вероятно опит да се удовлетвори правилото за отваряне с факт/място, "
+            f"но не е свързан граматически с остатъка. Прегледайте и обединете в едно изречение."
+        )
+
+
 def _opening_has_a_fact(text: str) -> bool:
     """Корпусът иска отваряне с число, дата или място. Числото и месецът са проверими."""
     first_line = next((line for line in text.splitlines() if line.strip()), "")
@@ -711,5 +796,8 @@ def enforce(
     _flag_foreign_script(working, notes)
     _flag_anniversary_mismatch(working, founded_year, today or date.today(), notes)
     _flag_weekday_mismatch(working, today or date.today(), notes)
+    _flag_wall_of_text(working, notes)
+    _flag_bracket_placeholder(working, notes)
+    _flag_orphan_opening_fragment(working, notes)
 
     return FormattingResult(text=working, fixes=fixes, notes=notes, unenforceable=list(rules.unparsed))

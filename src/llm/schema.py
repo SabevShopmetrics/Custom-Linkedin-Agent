@@ -59,6 +59,17 @@ class MediaSelectionItem(BaseModel):
         default=False,
         description="true ако снимката вероятно показва лице под 18 г. — задейства задължителен човешки преглед",
     )
+    # research-plan-34-speed-quality-second-pass.md (Част 4) / research-plan-35-critique-of-
+    # plan-34.md (Критика 5): и двете полета НЕЗАДЪЛЖИТЕЛНИ (`| None`, подразбиране None), не
+    # задължителни — модел, който не ги попълни (по-стар few-shot паметов отпечатък, или
+    # просто пропуск), пак трябва да парсне валидно, без InvalidResponseError/поправящ retry.
+    topical_mismatch: bool | None = Field(
+        default=None,
+        description="true ако снимката вероятно НЕ пасва тематично на брифа — флагни при съмнение",
+    )
+    mismatch_reason: str | None = Field(
+        default=None, description="кратко защо не пасва, ако topical_mismatch=true"
+    )
 
 
 class MediaSelectionSchema(BaseModel):

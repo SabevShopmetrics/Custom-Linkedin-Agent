@@ -33,10 +33,10 @@ from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.color import Gradient
-from textual.containers import Vertical, VerticalScroll
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual.theme import Theme
-from textual.widgets import Footer, Header, ProgressBar, RichLog, Static, TextArea
+from textual.widgets import Button, Footer, Header, ProgressBar, RichLog, Static, TextArea
 
 from src.brand.loader import BrandKnowledge, load_brand_knowledge
 from src.config import Config, ConfigError, load_config
@@ -45,14 +45,17 @@ from src.llm.client import LLMClient
 from src.logging_utils import register_persistent_handler, unregister_persistent_handler
 from src.pipeline import modes
 from src.pipeline.preview import render_preview
-from src.pipeline.runner import run_pipeline
+from src.pipeline.runner import FinalCheckUpdate, run_pipeline
 from src.pipeline.util import file_uri, read_text_or_none
 from src.repl import (
     _STEP_ORDER,
     _STEP_TAG_RE,
+    _default_file_picker,
+    _open_in_file_manager,
     copy_attachments,
     copy_to_clipboard,
     extract_inline_attachments,
+    resolve_attachments,
     slugify,
     unique_post_dir,
 )
@@ -209,6 +212,18 @@ class AgentTUI(App):
         color: $secondary;
         text-style: italic;
     }
+    #attach-row {
+        height: 3;
+        margin: 1 1 0 1;
+        align: left middle;
+    }
+    #attach-button {
+        min-width: 22;
+        margin-right: 2;
+    }
+    #attach-status {
+        color: $secondary;
+    }
     #brief {
         margin: 1 1 1 1;
         border: round $accent;
@@ -245,6 +260,8 @@ class AgentTUI(App):
         knowledge_loader=load_brand_knowledge,
         client_factory=LLMClient,
         pipeline_fn=run_pipeline,
+        file_picker_fn=_default_file_picker,
+        open_preview_fn=_open_in_file_manager,
     ) -> None:
         # Инжектирани зависимости, огледално на src/repl.py::Repl.__init__ — за да могат
         # тестовете (tests/test_tui.py) да подменят модел/конфигурация/конвейер без
@@ -255,8 +272,15 @@ class AgentTUI(App):
         self.knowledge_loader = knowledge_loader
         self.client_factory = client_factory
         self.pipeline_fn = pipeline_fn
+        self.file_picker_fn = file_picker_fn
+        self.open_preview_fn = open_preview_fn
         self.config: Config | None = None
         self.knowledge: BrandKnowledge | None = None
+
+        # Снимки, прикачени с бутона "📎 Прикачи снимки" (виж on_button_pressed) — чакат до
+        # следващото Enter в полето за брифа, после се сливат с евентуалните @път токени в
+        # самия текст (огледално на src/repl.py::SessionState.attachments) и се изчистват.
+        self._attachments: list[Path] = []
 
         # Жив индикатор "все още работи" (виж _tick_spinner) — потребителска обратна
         # връзка 2026-08-17: без него всяко мълчание между два лог реда (напр. бавен
@@ -312,6 +336,9 @@ class AgentTUI(App):
                 gradient=Gradient((0.0, _ACCENT), (1.0, _ACCENT)),
             )
             yield Static("", id="status")
+            with Horizontal(id="attach-row"):
+                yield Button("📎 Прикачи снимки", id="attach-button")
+                yield Static("", id="attach-status")
             yield BriefInput(
                 placeholder=(
                     "Опиши повода за поста (@път за снимка, /mode за дължина) и Enter… "
@@ -460,7 +487,7 @@ class AgentTUI(App):
             )
             return
 
-        brief, photos, unresolved = extract_inline_attachments(raw)
+        brief, inline_photos, unresolved = extract_inline_attachments(raw)
         if not brief:
             self.query_one("#log", RichLog).write("[bold red]Брифът е празен.[/]")
             return
@@ -468,6 +495,12 @@ class AgentTUI(App):
         input_widget = self.query_one("#brief", BriefInput)
         input_widget.disabled = True
         input_widget.text = ""
+
+        # Снимки от бутона "📎" + снимки от @токени в реда — обединени, огледално на
+        # src/repl.py::_new_post. Изчистват се тук, не се пренасят към следващия пост.
+        photos = self._attachments + inline_photos
+        self._attachments = []
+        self._update_attach_status()
 
         post_dir = unique_post_dir(self.posts_dir, slugify(brief), today=date.today())
         post_dir.mkdir(parents=True, exist_ok=True)
@@ -497,6 +530,51 @@ class AgentTUI(App):
         self.run_worker(
             lambda: self._generate(post_dir, token, mode_for_run), thread=True, exclusive=True, group="generate"
         )
+
+    # ------------------------------------------------------------------ прикачени снимки (бутон)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "attach-button":
+            self._pick_photos()
+
+    def _pick_photos(self) -> None:
+        """
+        Отваря системния диалог за избор на файлове — истинска кликаема икона с мишка,
+        за разлика от текстовия "+" еквивалент в src/repl.py (потребителска заявка:
+        "искам да е там като иконка и при натискане да прикачвам снимки", 2026-09-02).
+
+        Worker thread, не директно на главния event loop: tkinter.filedialog е блокираща
+        GUI извикване (виж `_default_file_picker` в repl.py) — точно както LLM извикването
+        в `_generate` по-долу, не бива да спира рендирането на самия TUI, докато диалогът е
+        отворен.
+        """
+        if self._generating:
+            return  # избягва конфликт с активна генерация, огледално на другите действия
+        self.query_one("#attach-button", Button).disabled = True
+        self.run_worker(self._pick_photos_worker, thread=True, exclusive=True, group="pick-photos")
+
+    def _pick_photos_worker(self) -> None:
+        paths = self.file_picker_fn()
+        self.call_from_thread(self._on_photos_picked, paths)
+
+    def _on_photos_picked(self, paths) -> None:
+        self.query_one("#attach-button", Button).disabled = False
+        log = self.query_one("#log", RichLog)
+        if paths is None:
+            log.write("[bold red]Диалог за избор на файлове не е наличен в тази среда.[/]")
+            return
+        if not paths:
+            return  # потребителят е затворил диалога без избор — тихо, без бележка
+        found, unresolved = resolve_attachments(paths)
+        self._attachments.extend(found)
+        for item in unresolved:
+            log.write(f"[bold red]✗ не разпознат файл: {item}[/]")
+        self._update_attach_status()
+
+    def _update_attach_status(self) -> None:
+        status = self.query_one("#attach-status", Static)
+        count = len(self._attachments)
+        status.update(f"{count} снимка(и) прикачени" if count else "")
 
     def _handle_mode_command(self, argument: str) -> None:
         """`/mode` в полето за брифа — виж докстринга на on_brief_input_submitted."""
@@ -529,8 +607,18 @@ class AgentTUI(App):
         client = self.client_factory(self.config)
         handler = _TuiLogHandler(self)
         register_persistent_handler(handler)
+
+        def on_final_check(update: FinalCheckUpdate) -> None:
+            # Извикано от СЪВСЕМ друг daemon thread (стъпка [7], виж runner.py), често дълго
+            # след като този _generate вече е приключил — НЕ се гейтва по `token` като
+            # _show_result/_show_error по-долу, защото точно тогава е полезно: потребителят
+            # може вече да гледа друг пост, докато закъснялата бележка идва за този тук.
+            self.call_from_thread(self._show_final_check_update, update)
+
         try:
-            result = self.pipeline_fn(post_dir, client, knowledge=self.knowledge, mode=mode)
+            result = self.pipeline_fn(
+                post_dir, client, knowledge=self.knowledge, mode=mode, on_final_check=on_final_check
+            )
         except AgentError as exc:
             self.call_from_thread(self._show_error, post_dir, exc, token)
         else:
@@ -580,10 +668,36 @@ class AgentTUI(App):
             copy_note = " · 📋 копирано в клипборда" if copied else ""
             link_line.update(f"🔗 Отвори в браузър (реалистичен изглед): {file_uri(preview_path)}{copy_note}")
             link_line.add_class("visible")
+            # Автоматично отваряне (потребителска обратна връзка 2026-09-03: "не се отваря
+            # директно в браузъра") — отделен OS прозорец, не пипа alt-screen буфера на TUI-то.
+            try:
+                self.open_preview_fn(preview_path)
+            except Exception:
+                pass
         except (FileNotFoundError, OSError) as exc:
             log.write(f"[dim]⚠ Прегледът не се генерира: {exc}[/]")
             link_line.update(f"⚠ Прегледът не се генерира: {exc}")
             link_line.add_class("visible")
+
+    def _show_final_check_update(self, update: FinalCheckUpdate) -> None:
+        """
+        Закъсняла нотификация от стъпка [7] (виж on_final_check в _generate) — идва от фонов
+        thread, потенциално минути след като потребителят вече е видял "✓ ready" и е започнал
+        нов пост. Нарочно винаги се показва (не се гейтва по `_gen_token`), с изрична поява на
+        коя папка се отнася — известното, документирано ограничение (TUI/REPL не се обновяват
+        визуално при закъсняла находка) вече има видим изход, не само запис в meta.json.
+        """
+        log = self.query_one("#log", RichLog)
+        label = update.post_dir.name
+        if update.status == "failed":
+            log.write(f"[yellow]⚠ (async: {label}) финалната проверка не успя: {update.error}[/]")
+            return
+        if not update.notes:
+            log.write(f"[dim]✓ (async: {label}) финалната проверка на предложението завърши чисто.[/]")
+            return
+        log.write(f"[bold yellow]⚠ (async: {label}) финалната проверка намери {len(update.notes)} нови бележки:[/]")
+        for note in update.notes:
+            log.write(f"[yellow]  · {note}[/]")
 
     def _show_error(self, post_dir: Path, exc: AgentError, token: int) -> None:
         if token != self._gen_token:

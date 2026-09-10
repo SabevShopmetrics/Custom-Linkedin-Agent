@@ -1,0 +1,530 @@
+<title>Сесията на linkedin-agent</title>
+
+<style>
+  :root {
+    --ground: #f3f1ec;
+    --surface: #ffffff;
+    --surface-2: #ebe8e1;
+    --ink: #201d17;
+    --ink-dim: #5c574c;
+    --line: #d8d3c8;
+    --accent: #1f5f8b;
+    --accent-ink: #0e3a54;
+    --font-display: "IBM Plex Mono", "Fira Code", ui-monospace, monospace;
+    --font-body: "IBM Plex Sans", "Segoe UI", sans-serif;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground: #14181c;
+      --surface: #1b2026;
+      --surface-2: #232a31;
+      --ink: #e8e6e0;
+      --ink-dim: #9aa0a6;
+      --line: #333c44;
+      --accent: #6fb3d9;
+      --accent-ink: #bfe2f5;
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground: #14181c;
+    --surface: #1b2026;
+    --surface-2: #232a31;
+    --ink: #e8e6e0;
+    --ink-dim: #9aa0a6;
+    --line: #333c44;
+    --accent: #6fb3d9;
+    --accent-ink: #bfe2f5;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--font-body);
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .page {
+    max-width: 1180px;
+    margin: 0 auto;
+    padding: 48px 28px 80px;
+    display: flex;
+    flex-direction: column;
+    gap: 28px;
+  }
+
+  .titleblock {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 4px 28px;
+    padding: 22px 26px;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+  }
+  .titleblock .eyebrow {
+    grid-column: 1 / -1;
+    font-family: var(--font-display);
+    font-size: 11px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--ink-dim);
+  }
+  h1 {
+    grid-column: 1 / -1;
+    font-family: var(--font-display);
+    font-size: clamp(24px, 3.4vw, 34px);
+    font-weight: 600;
+    margin: 2px 0 6px;
+    text-wrap: balance;
+    letter-spacing: -0.01em;
+  }
+  .meta-row {
+    grid-column: 1 / -1;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 22px;
+    font-size: 13.5px;
+    color: var(--ink-dim);
+    border-top: 1px solid var(--line);
+    padding-top: 12px;
+    margin-top: 6px;
+  }
+  .meta-row b { color: var(--ink); font-weight: 600; }
+  .meta-row code {
+    font-family: var(--font-display);
+    background: var(--surface-2);
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-size: 12.5px;
+  }
+
+  .note {
+    font-size: 14px;
+    color: var(--ink-dim);
+    max-width: 74ch;
+  }
+  .note b { color: var(--ink); }
+
+  .legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px 20px;
+    padding: 16px 20px;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    font-size: 13px;
+  }
+  .legend-group { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+  .legend-title {
+    font-family: var(--font-display);
+    font-size: 11px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--ink-dim);
+    margin-right: 4px;
+  }
+  .swatch { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+  .swatch .dot { width: 11px; height: 11px; border-radius: 3px; flex: none; border: 1.5px solid; }
+
+  .plate {
+    position: relative;
+    background: #0d1420;
+    border: 1px solid #2a3648;
+    border-radius: 6px;
+    padding: 26px 18px 18px;
+  }
+  .plate::before, .plate::after,
+  .plate .corner-br, .plate .corner-bl {
+    content: "";
+    position: absolute;
+    width: 16px;
+    height: 16px;
+    border-color: #4a6a8f;
+    border-style: solid;
+  }
+  .plate::before { top: 8px; left: 8px; border-width: 2px 0 0 2px; }
+  .plate::after { top: 8px; right: 8px; border-width: 2px 2px 0 0; }
+  .plate .corner-bl { bottom: 8px; left: 8px; border-width: 0 0 2px 2px; }
+  .plate .corner-br { bottom: 8px; right: 8px; border-width: 0 2px 2px 0; }
+  .plate-label {
+    font-family: var(--font-display);
+    font-size: 11px;
+    letter-spacing: 0.1em;
+    color: #6f8bab;
+    text-transform: uppercase;
+    text-align: center;
+    margin-bottom: 10px;
+  }
+  .diagram-scroll {
+    overflow-x: auto;
+    padding-bottom: 6px;
+  }
+
+  /* --- hand-built flow diagram — plain HTML/CSS + small inline SVG icons,
+     fixed blueprint-plate colors regardless of page theme --- */
+  .flow {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 2px;
+    font-family: var(--font-body);
+    max-width: 760px;
+    margin: 0 auto;
+  }
+  .flow-arrow { display: flex; justify-content: center; color: #4a6a8f; padding: 1px 0; }
+  .flow-node {
+    border-radius: 6px;
+    padding: 12px 16px;
+    font-size: 13.5px;
+    line-height: 1.5;
+  }
+  .node-tag {
+    font-family: var(--font-display);
+    font-size: 10.5px;
+    opacity: 0.8;
+    letter-spacing: 0.06em;
+  }
+  .node-title {
+    font-family: var(--font-display);
+    font-weight: 600;
+    font-size: 14.5px;
+    margin: 2px 0 5px;
+  }
+  .node-body ul { margin: 5px 0 0; padding-left: 18px; }
+  .node-body li { margin: 3px 0; }
+  .n-neutral  { background:#16273f; border:1px solid #3a6ea5; color:#eaf2fb; }
+  .n-llm      { background:#1c3a5e; border:1.5px solid #5fb4e0; color:#eaf6ff; }
+  .n-code     { background:#17263a; border:1px solid #7d93ad; color:#d7e2ee; }
+  .n-flag     { background:#3a2f12; border:1px solid #d9a441; color:#f7e9c8; }
+  .n-critical { background:#3a1414; border:1.5px solid #e0645a; color:#ffe3df; }
+  .n-async    { background:#241c3a; border:1px solid #a487e0; color:#ece3ff; }
+
+  .anchor {
+    display: flex; align-items: center; gap: 10px;
+    color: #5fb4e0; font-family: var(--font-display);
+    font-size: 11.5px; letter-spacing: 0.1em; text-transform: uppercase;
+    margin: 10px 0 6px;
+  }
+  .anchor::before, .anchor::after { content: ""; flex: 1; height: 1px; background: #2a4460; }
+
+  .decision-wrap { display: flex; justify-content: center; margin: 4px 0; }
+  .decision {
+    font-family: var(--font-display);
+    font-size: 12px;
+    color: #9cc4e4;
+    background: #132538;
+    border: 1px dashed #3a6ea5;
+    border-radius: 20px;
+    padding: 6px 16px;
+    text-align: center;
+  }
+
+  .branches { display: grid; gap: 14px; margin: 4px 0 2px; }
+  .branches.cols-2 { grid-template-columns: 1fr 1fr; }
+  .branches.cols-3 { grid-template-columns: repeat(3, 1fr); }
+  @media (max-width: 760px) {
+    .branches.cols-2, .branches.cols-3 { grid-template-columns: 1fr; }
+  }
+  .branch { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+  .branch-label {
+    font-family: var(--font-display); font-size: 10.5px; letter-spacing: 0.08em;
+    text-transform: uppercase; color: #6f8bab; text-align: center;
+  }
+
+  .loop-badge {
+    display: inline-flex; align-items: center; gap: 6px; align-self: center;
+    font-family: var(--font-display); font-size: 11px; color: #e0af5c;
+    background: #2c2410; border: 1px solid #6b551f; border-radius: 20px;
+    padding: 4px 13px; margin: 4px 0;
+  }
+
+  .ref-box {
+    background: #0f1c2c; border: 1px dashed #3a6ea5; border-radius: 6px;
+    padding: 10px 15px; font-size: 12.5px; color: #a9c4dc; line-height: 1.6;
+  }
+  .ref-box b { color: #cfe4f5; }
+
+  .callout {
+    background: #241c3a; border-left: 3px solid #a487e0;
+    padding: 8px 15px; font-size: 12.5px; color: #d8cdf0;
+    border-radius: 0 4px 4px 0;
+  }
+
+  footer {
+    font-size: 12.5px;
+    color: var(--ink-dim);
+    border-top: 1px solid var(--line);
+    padding-top: 14px;
+  }
+  footer code { font-family: var(--font-display); }
+
+  @media (max-width: 640px) {
+    .titleblock { grid-template-columns: 1fr; }
+  }
+</style>
+
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+
+<div class="page">
+
+  <div class="titleblock">
+    <div class="eyebrow">Custom-Linkedin-Agent · ИКТ Клъстер – Варна</div>
+    <h1>linkedin-agent — процесът на терминалната сесия</h1>
+    <div class="meta-row">
+      <span><b>Вход:</b> <code>$ linkedin-agent</code> (= <code>python -m src.cli</code>, без подкоманда)</span>
+      <span><b>Ядро:</b> <code>src/repl.py::Repl</code></span>
+      <span><b>Влиза в:</b> <code>src/pipeline/runner.py::run_pipeline()</code></span>
+    </div>
+  </div>
+
+  <p class="note">
+    Точният процес, който тръгва, когато напишеш <code>linkedin-agent</code> в терминала — цикълът,
+    който чете твоите редове, решава кога да повика конвейера за генериране, и как връща резултата.
+    Ръчно построена с HTML/CSS/SVG — рисунка, не диаграмен код, за да се вижда винаги коректно.
+  </p>
+
+  <div class="legend">
+    <div class="legend-group">
+      <span class="legend-title">Цвят</span>
+      <span class="swatch"><span class="dot" style="background:#16273f;border-color:#3a6ea5"></span>стъпка на сесията</span>
+      <span class="swatch"><span class="dot" style="background:#17263a;border-color:#7d93ad"></span>детерминирана логика</span>
+      <span class="swatch"><span class="dot" style="background:#1c3a5e;border-color:#5fb4e0"></span>резултат от конвейера</span>
+      <span class="swatch"><span class="dot" style="background:#3a2f12;border-color:#d9a441"></span>разклонение / въпрос към човека</span>
+      <span class="swatch"><span class="dot" style="background:#3a1414;border-color:#e0645a"></span>изход / грешка</span>
+      <span class="swatch"><span class="dot" style="background:#241c3a;border-color:#a487e0"></span>странична команда (/revise, /again)</span>
+    </div>
+  </div>
+
+  <div class="plate">
+    <div class="corner-bl"></div><div class="corner-br"></div>
+    <div class="plate-label">Сесията на <code style="color:#8fb3d4">linkedin-agent</code> (REPL) — src/repl.py</div>
+    <div class="diagram-scroll">
+      <div class="flow">
+
+        <div class="flow-node n-neutral">
+          <div class="node-tag">ВХОД</div>
+          <div class="node-title">$ linkedin-agent</div>
+          <div class="node-body">
+            (= <code style="opacity:.85">python -m src.cli</code>) → <code style="opacity:.85">main()</code> →
+            няма подкоманда → <code style="opacity:.85">cmd_chat()</code>
+          </div>
+        </div>
+        <div class="flow-arrow"><svg viewBox="0 0 24 24" width="18" height="18" role="img" aria-label="продължава"><path d="M12 2 L12 18 M5 11 L12 19 L19 11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+
+        <div class="flow-node n-code">
+          <div class="node-tag">ИНИЦИАЛИЗАЦИЯ · еднократно</div>
+          <div class="node-title">Repl.run() — старт на сесията</div>
+          <div class="node-body">
+            <ul>
+              <li>.env липсва? → предложи еднократно създаване (само API ключ)</li>
+              <li>зареди <code style="opacity:.85">config</code> + <code style="opacity:.85">knowledge/</code> — <b>веднъж</b> за цялата сесия, не за всеки бриф</li>
+              <li>отпечатай банер (реални числа от заредения корпус)</li>
+              <li>регистрирай <code style="opacity:.85">ProgressHandler</code> — препраща логовете на конвейера към конзолата на живо</li>
+            </ul>
+          </div>
+        </div>
+        <div class="flow-arrow"><svg viewBox="0 0 24 24" width="18" height="18" role="img" aria-label="продължава"><path d="M12 2 L12 18 M5 11 L12 19 L19 11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+
+        <div class="anchor">⟳ главен цикъл — чака следващ ред</div>
+
+        <div class="flow-node n-neutral">
+          <div class="node-tag">ВХОД НА РЕД</div>
+          <div class="node-title">Чете един ред от промпта</div>
+          <div class="node-body">ред, завършващ на <code style="opacity:.85">\</code>, продължава на следващия (многоредов бриф)</div>
+        </div>
+
+        <div class="decision-wrap"><div class="decision">Ctrl+C / EOF на празен вход?</div></div>
+        <div class="branches cols-2">
+          <div class="branch">
+            <span class="branch-label">да</span>
+            <div class="flow-node n-critical">освободи <code style="opacity:.85">ProgressHandler</code> → „Дочуване." → <b>процесът приключва</b></div>
+          </div>
+          <div class="branch">
+            <span class="branch-label">не · празен ред</span>
+            <div class="loop-badge">↺ обратно към главния цикъл</div>
+          </div>
+        </div>
+
+        <div class="flow-arrow"><svg viewBox="0 0 24 24" width="18" height="18" role="img" aria-label="продължава"><path d="M12 2 L12 18 M5 11 L12 19 L19 11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+
+        <div class="decision-wrap"><div class="decision">има съдържание → handle(line) разпределя реда</div></div>
+
+        <div class="branches cols-3">
+          <div class="branch">
+            <span class="branch-label">дума „нов" / „wizard"</span>
+            <div class="flow-node n-flag">
+              <div class="node-title">/wizard поток</div>
+              <div class="node-body">
+                „Какво се случи?" — само ако липсва бриф в аргумента<br/>
+                пита за снимки — само ако още няма нито една прикачена<br/>
+                → влиза в <b>„Нов пост"</b>
+              </div>
+            </div>
+          </div>
+          <div class="branch">
+            <span class="branch-label">ред започва с „/"</span>
+            <div class="flow-node n-flag">
+              <div class="node-title">/команда (19 на брой)</div>
+              <div class="node-body">
+                сесия: /mode /attach /photos<br/>
+                генериране: <b>/revise · /again</b><br/>
+                преглед: /last /log /dir /open /preview<br/>
+                система: /check /knowledge /reload /clear /help /exit<br/>
+                непозната → грешка
+              </div>
+            </div>
+          </div>
+          <div class="branch">
+            <span class="branch-label">обикновен текст</span>
+            <div class="flow-node n-flag">
+              <div class="node-title">нов пост</div>
+              <div class="node-body">
+                извлича <code style="opacity:.85">@път</code> снимки от реда<br/>
+                празен бриф? → грешка
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="branches cols-3" style="margin-top:-4px">
+          <div class="branch"><div class="loop-badge" style="align-self:center">↓ „Нов пост" общ път</div></div>
+          <div class="branch"><div class="loop-badge">↓ /revise, /again → „ГЕНЕРИРАНЕ" &nbsp;·&nbsp; останалите → ↺ цикъла</div></div>
+          <div class="branch"><div class="loop-badge" style="align-self:center">↓ „Нов пост" общ път</div></div>
+        </div>
+
+        <div class="flow-arrow"><svg viewBox="0 0 24 24" width="18" height="18" role="img" aria-label="продължава"><path d="M12 2 L12 18 M5 11 L12 19 L19 11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+
+        <div class="anchor">„нов пост" — общ път от wizard и от свободен текст</div>
+
+        <div class="decision-wrap"><div class="decision">прилича на копирания текст от последния готов пост? (≥40 знака)</div></div>
+        <div class="branches cols-2">
+          <div class="branch">
+            <span class="branch-label">да → потвърди</span>
+            <div class="flow-node n-critical">пита потвърждение — „не" → откажи</div>
+            <div class="loop-badge" style="align-self:center">↺ обратно към главния цикъл</div>
+          </div>
+          <div class="branch">
+            <span class="branch-label">не / потвърдено</span>
+            <div class="flow-node n-code">
+              създай <code style="opacity:.85">posts/&lt;дата&gt;-&lt;slug&gt;/</code>,
+              запиши <code style="opacity:.85">briefing.md</code>, копирай снимки
+            </div>
+          </div>
+        </div>
+
+        <div class="decision-wrap"><div class="decision">thin-brief precheck — Планерът вика се директно (кешира в plan.json)</div></div>
+        <div class="branches cols-2">
+          <div class="branch">
+            <span class="branch-label">брифът е „тънък"</span>
+            <div class="flow-node n-flag">
+              пита ЕДНО уточняващо въпросче — отговорено? → обогати брифа,
+              изтрий <code style="opacity:.85">plan.json</code>, <code style="opacity:.85">force=true</code>
+            </div>
+          </div>
+          <div class="branch">
+            <span class="branch-label">„тънък, но достатъчен" / не тънък</span>
+            <div class="flow-node n-code">продължи без въпрос</div>
+          </div>
+        </div>
+
+        <div class="flow-arrow"><svg viewBox="0 0 24 24" width="18" height="18" role="img" aria-label="продължава"><path d="M12 2 L12 18 M5 11 L12 19 L19 11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+
+        <div class="anchor">„ГЕНЕРИРАНЕ" — общ вход: нов пост · /again · /revise</div>
+
+        <div class="flow-node n-code">
+          <div class="node-tag">_generate()</div>
+          <div class="node-body">
+            <ul>
+              <li>нов <code style="opacity:.85">LLMClient</code> — един клиент на пускане (call_log в meta.json остава чист)</li>
+              <li>пусни <code style="opacity:.85">run_pipeline()</code> във фонова нишка</li>
+              <li>главната нишка показва жив progress bar „стъпка N/7" + спинър, синхронизиран по таговете в run.log</li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="ref-box">
+          <b>run_pipeline() = пълният v3 конвейер</b> (<code style="opacity:.85">src/pipeline/runner.py::_run_pipeline_v3</code>):<br/>
+          [1] Планер → [2]/[3] Писател + Media Picker → [4] Критик → [5] Post II →
+          [6] Консолидатор → [6б] Механични правила → [7] Асинхронна проверка
+        </div>
+
+        <div class="callout">
+          тук <code style="opacity:.9">wait_for_final_check_seconds</code> винаги <b>= 0</b> —
+          за разлика от CLI <code style="opacity:.9">generate</code> (90s), REPL сесията никога
+          не чака стъпка [7]. Тя пише в <code style="opacity:.9">meta.json</code> по-късно,
+          best-effort, само ако процесът е все още жив (следваща команда в тази сесия).
+        </div>
+
+        <div class="decision-wrap"><div class="decision">AgentError?</div></div>
+        <div class="branches cols-2">
+          <div class="branch">
+            <span class="branch-label">да</span>
+            <div class="flow-node n-critical">покажи частичен текст (ако има) + грешка + път до run.log</div>
+            <div class="loop-badge" style="align-self:center">↺ обратно към главния цикъл</div>
+          </div>
+          <div class="branch">
+            <span class="branch-label">не — успех</span>
+            <div class="flow-node n-llm">
+              <div class="node-body">
+                <ul>
+                  <li>отпечатай текста на поста</li>
+                  <li>resolution_summary · ✎ приложени поправки</li>
+                  <li>⚠ open_notes · ⚠ warnings</li>
+                  <li>статус ред (✓/⚠ · режим · извиквания · време)</li>
+                  <li>копирай в клипборда (best-effort) · рендирай <code style="opacity:.85">preview.html</code></li>
+                  <li>подсказка: /revise · /preview · нов ред = нов пост</li>
+                </ul>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="decision-wrap"><div class="decision">insufficient_brief?</div></div>
+        <div class="branches cols-2">
+          <div class="branch">
+            <span class="branch-label">да</span>
+            <div class="flow-node n-flag">
+              пита: „Enter продължава, или напиши детайли сега" — отговорено?
+              → допиши briefing.md
+            </div>
+            <div class="loop-badge" style="align-self:center">↺ отново в „ГЕНЕРИРАНЕ" (force=true)</div>
+          </div>
+          <div class="branch">
+            <span class="branch-label">не</span>
+            <div class="loop-badge" style="align-self:center">↺ обратно към главния цикъл</div>
+          </div>
+        </div>
+
+        <div class="anchor">странични входове към „ГЕНЕРИРАНЕ"</div>
+        <div class="branches cols-2">
+          <div class="branch">
+            <span class="branch-label">/revise &lt;инструкция&gt;</span>
+            <div class="flow-node n-async">
+              допиши „Бележка за ревизия N" в briefing.md · режимът на инструкцията печели
+              над sticky режима на сесията, ако пряко му противоречи → <code style="opacity:.85">force=true</code>
+            </div>
+          </div>
+          <div class="branch">
+            <span class="branch-label">/again (/regen)</span>
+            <div class="flow-node n-async">същата <code style="opacity:.85">post_dir</code>, <code style="opacity:.85">force=true</code></div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+  <footer>
+    Извлечено от <code>src/repl.py</code> (класовете <code>Repl</code>/<code>SessionState</code>),
+    <code>pyproject.toml</code> (<code>linkedin-agent = "src.cli:main"</code>) и
+    <code>src/pipeline/runner.py::_run_pipeline_v3</code> за препратката към конвейера —
+    състояние към плановете 24–32. Жълтите значки „↺" означават връщане в цикъла, не
+    нормалния еднократен успешен път.
+  </footer>
+
+</div>

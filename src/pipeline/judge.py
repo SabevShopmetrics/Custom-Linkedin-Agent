@@ -12,6 +12,14 @@
 3 извиквания, приемливо. Съзнателно не мащабирано за голямо N: разход расте квадратично,
 без измерена полза отвъд малкото N (виж план 15).
 
+Сравненията вървят ПАРАЛЕЛНО (ThreadPoolExecutor), огледално на writer.write_candidates()
+и verifier.check_all() в същия конвейер (виж research-plan-16-speed-ux-quality-roadmap.md —
+установи, че v5 излиза по-бавен от v3 именно защото Съдията сериализираше независими
+извиквания; research-plan-35-critique-of-plan-34.md, Критика 4, за точния патърн: всяко
+сравнение връща чист tuple, `wins`/`pairwise_log` се пълнят СЛЕД като всички futures
+приключат, в главната нишка — никога инкрементирани отвътре в паралелна задача, за да няма
+race condition върху споделен dict).
+
 Кандидат с нарушение на rules/forbidden.md (facts_check.CandidateVerification.blocked)
 се изважда от сравнението изцяло — process-4.md: "не се смекчава". Ако ВСИЧКИ кандидати
 са блокирани (краен, но възможен случай), последна линия вместо конвейерът да остане без
@@ -22,6 +30,7 @@
 from __future__ import annotations
 
 import itertools
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -84,6 +93,43 @@ class JudgementResult:
     reasoning_summary: str = ""
     excluded_blocked: list[str] = field(default_factory=list)
     fallback_used: bool = False
+
+
+def _compare_pair(
+    client: LLMClient,
+    knowledge: BrandKnowledge,
+    plan: PlanSchema,
+    by_name: dict[str, str],
+    verif_by_name: dict[str, CandidateVerification],
+    name_a: str,
+    name_b: str,
+) -> tuple[str, str, str, str]:
+    """
+    Едно pairwise сравнение — извикано паралелно за всяка двойка от select() (виж докстринга
+    на модула). Връща (name_a, name_b, winner_name, summary) — чист tuple, без да пипа
+    споделено състояние (`wins`/`pairwise_log` живеят само в select(), попълват се СЛЕД като
+    всички паралелни извиквания приключат).
+    """
+    prompt_system = PAIRWISE_SYSTEM_PROMPT.format(
+        brand_context=knowledge.stable_context or "(няма зареден brand контекст)",
+        post_type=plan.post_type,
+        tone=plan.tone,
+        name_a=name_a,
+        unverified_a=verif_by_name[name_a].unverified_count,
+        text_a=by_name[name_a],
+        name_b=name_b,
+        unverified_b=verif_by_name[name_b].unverified_count,
+        text_b=by_name[name_b],
+    )
+    verdict = client.complete(
+        Role.JUDGE,
+        "Сравни версия A срещу версия B и избери една.",
+        system=prompt_system,
+        schema=PairwiseVerdictSchema,
+    )
+    assert isinstance(verdict, PairwiseVerdictSchema)
+    winner_name = name_a if verdict.winner == "A" else name_b
+    return name_a, name_b, winner_name, verdict.summary
 
 
 def select(
@@ -149,28 +195,20 @@ def select(
 
     wins = {name: 0 for name in eligible}
     pairwise_log: list[dict[str, Any]] = []
-    for name_a, name_b in itertools.combinations(eligible, 2):
-        prompt_system = PAIRWISE_SYSTEM_PROMPT.format(
-            brand_context=knowledge.stable_context or "(няма зареден brand контекст)",
-            post_type=plan.post_type,
-            tone=plan.tone,
-            name_a=name_a,
-            unverified_a=verif_by_name[name_a].unverified_count,
-            text_a=by_name[name_a],
-            name_b=name_b,
-            unverified_b=verif_by_name[name_b].unverified_count,
-            text_b=by_name[name_b],
-        )
-        verdict = client.complete(
-            Role.JUDGE,
-            "Сравни версия A срещу версия B и избери една.",
-            system=prompt_system,
-            schema=PairwiseVerdictSchema,
-        )
-        assert isinstance(verdict, PairwiseVerdictSchema)
-        winner_name = name_a if verdict.winner == "A" else name_b
+    pairs = list(itertools.combinations(eligible, 2))
+    with ThreadPoolExecutor(max_workers=len(pairs)) as executor:
+        futures = [
+            executor.submit(_compare_pair, client, knowledge, plan, by_name, verif_by_name, name_a, name_b)
+            for name_a, name_b in pairs
+        ]
+        # Събери резултатите тук, в главната нишка — futures могат да приключат в произволен
+        # ред (виж докстринга на модула), но всеки резултат носи собствените си name_a/name_b,
+        # затова редът на събиране няма значение за коректността.
+        comparisons = [future.result() for future in futures]
+
+    for name_a, name_b, winner_name, summary in comparisons:
         wins[winner_name] += 1
-        pairwise_log.append({"a": name_a, "b": name_b, "winner": winner_name, "summary": verdict.summary})
+        pairwise_log.append({"a": name_a, "b": name_b, "winner": winner_name, "summary": summary})
 
     best_wins = max(wins.values())
     top = [name for name, count in wins.items() if count == best_wins]

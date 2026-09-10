@@ -91,7 +91,7 @@ from src.logging_utils import register_persistent_handler, unregister_persistent
 from src.pipeline import modes, planner
 from src.pipeline.consolidator import PipelineResult
 from src.pipeline.preview import render_preview
-from src.pipeline.runner import run_pipeline
+from src.pipeline.runner import FinalCheckUpdate, run_pipeline
 from src.pipeline.util import PHOTO_EXTENSIONS, file_uri, list_photos, read_text_or_none
 from src.terminal import force_utf8_io, sanitize_input
 
@@ -111,10 +111,14 @@ HELP_TEXT = """\
 кого да спомене безопасно, чувствителен ли е постът, какъв тон да ползва — това си е
 негова работа, не твоя.
 Ред, завършващ с \\, продължава на следващия (за по-дълъг бриф).
-Снимка се прикачва с @път вътре в брифа, с /attach, или просто я провлачи при /wizard.
+Снимка се прикачва по няколко начина — избери кой ти е по-удобен:
+  · провлачи файла direктно на промпта и Enter (без нищо отпред)
+  · "+" сам на реда (или /pick, /browse) — отваря диалог за избор на файлове с мишка
+  · @път вътре в самия бриф, /attach <път>, или просто я провлачи при /wizard
 
   нов               (или /wizard, /w) — като обикновен ред, но пита за снимки при нужда
   /mode [режим]     дължина на следващия пост — Кадър/Фокус/Панорама (виж /mode без аргумент)
+  +                 отваря диалог за избор на снимки с мишка (или /pick, /browse)
   /attach <път> …   прикачва снимка, папка със снимки или маска (*.jpg)
   /photos           показва прикаченото; /photos clear го изчиства
   /revise <текст>   пренаписва последния пост с допълнителна инструкция
@@ -293,6 +297,57 @@ def resolve_attachments(args: Iterable[str]) -> tuple[list[Path], list[str]]:
     return found, unresolved
 
 
+def bare_photo_paths(line: str) -> list[Path] | None:
+    """
+    Ако ЦЕЛИЯТ ред са само пътища до съществуващи снимки — най-естественото движение,
+    провлачи файла(овете) направо на промпта и Enter, без @ отпред или /attach — разпознай
+    ги автоматично, вместо да ги third-ираш буквално като текст на нов бриф.
+
+    Връща None, ако дори ЕДИН токен на реда не се разрешава до снимка — тогава редът е
+    обикновен текст (напр. "Ето my-photo.jpg от снощи" не бива тихо да изяде текста, само
+    защото едно от думите му случайно съвпада с истински файл на диска).
+    """
+    tokens = split_path_args(line)
+    if not tokens:
+        return None
+    found: list[Path] = []
+    for token in tokens:
+        matches = _expand_one(token)
+        if not matches:
+            return None
+        found.extend(matches)
+    return found or None
+
+
+def _default_file_picker() -> tuple[str, ...] | None:
+    """
+    Реалният системен диалог за избор на файлове (tkinter) — подразбиране за
+    `Repl.file_picker_fn`, инжектирано в __init__ по същия модел като client_factory/
+    pipeline_fn/clipboard_fn, за да могат тестовете да го подменят без реален GUI.
+
+    Връща `None`, ако tkinter не е наличен в средата (напр. сървър без графичен
+    интерфейс) — различно от празен тъпъл (`()`), който значи "потребителят не избра
+    нищо" — cmd_pick_photos показва различно съобщение за двата случая.
+    """
+    try:
+        import tkinter
+        from tkinter import filedialog
+    except ImportError:
+        return None
+
+    root = tkinter.Tk()
+    root.withdraw()
+    root.attributes("-topmost", True)
+    filetypes = [
+        ("Снимки", " ".join(f"*{ext}" for ext in sorted(PHOTO_EXTENSIONS))),
+        ("Всички файлове", "*.*"),
+    ]
+    try:
+        return filedialog.askopenfilenames(title="Избери снимки за поста", filetypes=filetypes)
+    finally:
+        root.destroy()
+
+
 def extract_inline_attachments(text: str) -> tuple[str, list[Path], list[str]]:
     """
     Изважда `@път` от текста на брифа. Токен, който НЕ сочи към съществуваща снимка,
@@ -436,6 +491,8 @@ class Repl:
         client_factory: Callable[[Config], LLMClient] = LLMClient,
         pipeline_fn: Callable[..., PipelineResult] = run_pipeline,
         clipboard_fn: Callable[[str], bool] | None = None,
+        file_picker_fn: Callable[[], tuple[str, ...] | None] = _default_file_picker,
+        open_preview_fn: Callable[[Path], None] | None = None,
         env_path: Path = ENV_PATH,
         env_example_path: Path = ENV_EXAMPLE_PATH,
         today: date | None = None,
@@ -449,6 +506,8 @@ class Repl:
         self.client_factory = client_factory
         self.pipeline_fn = pipeline_fn
         self.clipboard_fn = clipboard_fn or copy_to_clipboard
+        self.file_picker_fn = file_picker_fn
+        self.open_preview_fn = open_preview_fn or _open_in_file_manager
         self.env_path = env_path
         self.env_example_path = env_example_path
         self.today = today
@@ -555,9 +614,14 @@ class Repl:
                 f"{len(self.knowledge.good_examples)} еталонни поста · "
                 f"писател: {self.config.model_writer}",
                 "",
-                "Напиши едно изречение за какво е постът — останалото го решавам сам.",
-                f"Дължина: {modes.get_mode(self.state.mode).label} (по подразбиране) — /mode за Кадър/Панорама.",
-                "Напиши 'нов', ако искаш помощ конкретно със снимки. /help за всички команди.",
+                "Напиши с няколко думи какво се е случило — Enter генерира поста.",
+                "📎 Снимки: провлачи файл тук, или напиши '+' и избери с мишка.",
+                "",
+                "Най-важни команди:",
+                f"  /mode      колко дълъг да е постът (сега: {modes.get_mode(self.state.mode).label})",
+                "  /revise    променя последния пост по твоя инструкция",
+                "  /again     генерира последния бриф наново",
+                "  /help      всички команди",
             ]
         )
         self.out(self.ink.panel(body, title=f"LinkedIn агент — {org_name}"))
@@ -573,7 +637,23 @@ class Repl:
             self.cmd_wizard("")
             return
 
+        # "+" сам на реда отваря системния диалог за избор на файлове — аналог на "+"
+        # бутона за прикачване в Claude Code, за човек, който предпочита мишка пред
+        # ръчно писане/влачене на път. Виж cmd_pick_photos.
+        if line.strip() == "+":
+            self.cmd_pick_photos()
+            return
+
         if not line.startswith("/"):
+            # Целият ред е само път(и) до снимка(и), провлачени директно на промпта, без
+            # @ отпред — най-интуитивното движение. Виж докстринга на bare_photo_paths.
+            photos = bare_photo_paths(line)
+            if photos is not None:
+                self.state.attachments.extend(photos)
+                self.out(
+                    self.ink.ok(f"  + {len(photos)} снимка(и); общо прикачени: {len(self.state.attachments)}")
+                )
+                return
             self._new_post(line)
             return
 
@@ -586,6 +666,8 @@ class Repl:
             "w": self.cmd_wizard,
             "mode": self.cmd_mode,
             "attach": self.cmd_attach,
+            "pick": self.cmd_pick_photos,
+            "browse": self.cmd_pick_photos,
             "preview": self.cmd_preview,
             "photos": self.cmd_photos,
             "revise": self.cmd_revise,
@@ -649,6 +731,33 @@ class Repl:
             self.out(self.ink.ok(f"  + {len(found)} снимка(и); общо прикачени: {len(self.state.attachments)}"))
         for item in unresolved:
             self.out(self.ink.err(f"  ✗ не намерена снимка: {item}"))
+
+    def cmd_pick_photos(self, _argument: str = "") -> None:
+        """
+        Отваря системния диалог за избор на файлове (мишка, без ръчно писане/влачене на
+        път) — аналог на "+" бутона за прикачване в Claude Code. Достъпен и с бърза дума
+        "+" сама на реда, и с /pick или /browse. Резултатът е идентичен на /attach — просто
+        друг начин да се стигне дотам, за човек, който предпочита да разгледа папките си
+        визуално.
+
+        Самият диалог (`self.file_picker_fn`) е инжектиран в __init__ по подразбиране към
+        `_default_file_picker` (tkinter) — същия модел като client_factory/pipeline_fn/
+        clipboard_fn — за да могат тестовете да го подменят без реален графичен интерфейс.
+        """
+        paths = self.file_picker_fn()
+        if paths is None:
+            self.out(self.ink.err("  Диалог за избор на файлове не е наличен в тази среда — ползвай /attach <път>."))
+            return
+        if not paths:
+            self.out(self.ink.dim("  Нищо не е избрано."))
+            return
+
+        found, unresolved = resolve_attachments(paths)
+        self.state.attachments.extend(found)
+        if found:
+            self.out(self.ink.ok(f"  + {len(found)} снимка(и); общо прикачени: {len(self.state.attachments)}"))
+        for item in unresolved:
+            self.out(self.ink.err(f"  ✗ не разпознат файл: {item}"))
 
     def cmd_photos(self, argument: str) -> None:
         if argument.strip().lower() in {"clear", "изчисти"}:
@@ -1032,7 +1141,13 @@ class Repl:
         try:
             result = self._run_with_spinner(
                 lambda: self.pipeline_fn(
-                    post_dir, client, force=force, knowledge=self.knowledge, mode=effective_mode, today=self.today
+                    post_dir,
+                    client,
+                    force=force,
+                    knowledge=self.knowledge,
+                    mode=effective_mode,
+                    today=self.today,
+                    on_final_check=self._show_final_check_update,
                 )
             )
         except AgentError as exc:
@@ -1091,6 +1206,13 @@ class Repl:
         try:
             preview_path = render_preview(post_dir)
             self.out(self.ink.accent(f"  🔗 Отвори в браузър (реалистичен изглед): {file_uri(preview_path)}"))
+            # Автоматично отваряне (потребителска обратна връзка 2026-09-03: "не се отваря
+            # директно в браузъра") — same механизъм като /preview (_open_in_file_manager
+            # по-долу), best-effort, огледално на copy_to_clipboard по-горе.
+            try:
+                self.open_preview_fn(preview_path)
+            except Exception:
+                pass
         except (FileNotFoundError, OSError) as exc:
             self.out(self.ink.dim(f"  ⚠ Прегледът не се генерира: {exc}"))
 
@@ -1113,6 +1235,26 @@ class Repl:
                 briefing_path.write_text(f"{existing}\n{answer}\n", encoding="utf-8")
                 self._generate(post_dir, force=True, mode_override=mode_override)
 
+    def _show_final_check_update(self, update: FinalCheckUpdate) -> None:
+        """
+        Извикано от daemon thread-а на стъпка [7] (виж runner.py::_start_async_final_check),
+        често секунди до минути СЛЕД като `_generate` вече е върнала контрол на потребителя —
+        възможно е той вече да седи на подканата за следваща команда или дори да е започнал
+        нов пост. Печата директно (само best-effort подредба с водещ нов ред), вместо да чака
+        следваща команда — известното ограничение (TUI/REPL не се обновяват визуално при
+        закъсняла находка от стъпка 7) вече има видим изход тук, не само запис в meta.json.
+        """
+        label = update.post_dir.name
+        if update.status == "failed":
+            self.out(self.ink.warn(f"\n  ⚠ (async: {label}) финалната проверка не успя: {update.error}"))
+            return
+        if not update.notes:
+            self.out(self.ink.dim(f"\n  ✓ (async: {label}) финалната проверка на предложението завърши чисто."))
+            return
+        self.out(self.ink.warn(f"\n  ⚠ (async: {label}) финалната проверка намери {len(update.notes)} нови бележки:"))
+        for note in update.notes:
+            self.out(self.ink.warn(f"    · {note}"))
+
     def cmd_preview(self, _argument: str = "") -> None:
         """
         Генерира и отваря output/preview.html (текст + избрани снимки, самостоятелен файл) —
@@ -1128,7 +1270,7 @@ class Repl:
         except FileNotFoundError as exc:
             self.out(self.ink.err(f"  ✗ {exc}"))
             return
-        _open_in_file_manager(preview_path)
+        self.open_preview_fn(preview_path)
         self.out(self.ink.dim(f"  Отворено: {preview_path}"))
 
     def _print_post(self, text: str) -> None:
