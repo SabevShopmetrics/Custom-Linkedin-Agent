@@ -57,7 +57,7 @@ def test_complete_config_loads_successfully(monkeypatch, tmp_path):
 
     assert config.openwebui_base_url == "https://chat.velocity.online"
     assert config.model_writer == "writer-model"
-    assert config.request_timeout_seconds == 120  # подразбиране, не е зададено в .env
+    assert config.request_timeout_seconds == 300  # подразбиране, не е зададено в .env (research-plan-36, А8)
 
 
 def test_non_numeric_timeout_raises_clear_error(monkeypatch, tmp_path):
@@ -132,3 +132,17 @@ def test_non_numeric_temperature_is_a_clear_config_error(monkeypatch):
         load_config()
 
     assert "TEMPERATURE" in str(exc.value)
+
+
+def test_child_environ_drops_values_loaded_from_dotenv_after_start(monkeypatch):
+    # Уеб сървърът зарежда .env веднъж; без това всяка следваща задача наследяваше старите
+    # стойности (на живо 2026-10-13: таймаут 120 s, въпреки REQUEST_TIMEOUT_SECONDS=300 в .env).
+    import src.config as config_module
+
+    monkeypatch.setattr(config_module, "_ENV_BEFORE_DOTENV", frozenset({"SHELL_ONLY"}))
+    monkeypatch.setenv("SHELL_ONLY", "from-shell")
+    monkeypatch.setenv("REQUEST_TIMEOUT_SECONDS", "120")  # като че ли заредено от .env по-късно
+
+    env = config_module.child_environ()
+    assert env["SHELL_ONLY"] == "from-shell"
+    assert "REQUEST_TIMEOUT_SECONDS" not in env

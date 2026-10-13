@@ -260,8 +260,8 @@ class AgentTUI(App):
         knowledge_loader=load_brand_knowledge,
         client_factory=LLMClient,
         pipeline_fn=run_pipeline,
-        file_picker_fn=_default_file_picker,
-        open_preview_fn=_open_in_file_manager,
+        file_picker_fn=None,
+        open_preview_fn=None,
     ) -> None:
         # Инжектирани зависимости, огледално на src/repl.py::Repl.__init__ — за да могат
         # тестовете (tests/test_tui.py) да подменят модел/конфигурация/конвейер без
@@ -272,8 +272,10 @@ class AgentTUI(App):
         self.knowledge_loader = knowledge_loader
         self.client_factory = client_factory
         self.pipeline_fn = pipeline_fn
-        self.file_picker_fn = file_picker_fn
-        self.open_preview_fn = open_preview_fn
+        # Резолюция при създаване, не при дефиниция: стойност по подразбиране, свързана при
+        # import, заобикаляше подмяната в тестовете и отваряше истински прозорци (2026-10-12).
+        self.file_picker_fn = file_picker_fn or _default_file_picker
+        self.open_preview_fn = open_preview_fn or _open_in_file_manager
         self.config: Config | None = None
         self.knowledge: BrandKnowledge | None = None
 

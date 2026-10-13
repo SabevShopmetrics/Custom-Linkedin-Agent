@@ -32,12 +32,13 @@ def test_generate_with_brief_creates_folder_and_writes_briefing(tmp_path, monkey
     monkeypatch.setattr(cli, "load_config", lambda: _fake_config())
     monkeypatch.setattr(cli, "LLMClient", lambda config: object())
 
-    def fake_run_pipeline(pd, client, *, force, mode=None, wait_for_final_check_seconds=0.0):
+    def fake_run_pipeline(pd, client, *, force, mode=None, **kwargs):
         captured_force["value"] = force
 
         class Result:
             status = "ready"
             post_path = pd / "output" / "post.md"
+            meta_path = pd / "output" / "meta.json"
             output_dir = pd / "output"
             warnings = []
             open_notes = []
@@ -77,12 +78,13 @@ def test_generate_without_brief_uses_explicit_force_flag(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "load_config", lambda: _fake_config())
     monkeypatch.setattr(cli, "LLMClient", lambda config: object())
 
-    def fake_run_pipeline(pd, client, *, force, mode=None, wait_for_final_check_seconds=0.0):
+    def fake_run_pipeline(pd, client, *, force, mode=None, **kwargs):
         captured_force["value"] = force
 
         class Result:
             status = "ready"
             post_path = pd / "output" / "post.md"
+            meta_path = pd / "output" / "meta.json"
             output_dir = pd / "output"
             warnings = []
             open_notes = []

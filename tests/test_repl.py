@@ -51,7 +51,16 @@ class FakePipeline:
         self.final_check_update = final_check_update
 
     def __call__(self, post_dir: Path, client, *, force: bool = False, knowledge=None, **kwargs) -> PipelineResult:
-        self.calls.append({"post_dir": post_dir, "force": force, "knowledge": knowledge, "mode": kwargs.get("mode")})
+        self.calls.append(
+            {
+                "post_dir": post_dir,
+                "force": force,
+                "knowledge": knowledge,
+                "mode": kwargs.get("mode"),
+                "revision": kwargs.get("revision"),
+                "on_draft": kwargs.get("on_draft"),
+            }
+        )
         if self.raises is not None:
             raise self.raises
         on_final_check = kwargs.get("on_final_check")
@@ -68,6 +77,11 @@ class FakePipeline:
             warnings=self.warnings,
             insufficient_brief=self.insufficient_brief,
         )
+
+    def revise(self, post_dir: Path, client, instruction: str, **kwargs) -> PipelineResult:
+        """Заместител на runner.run_revision (research-plan-36, Б2) — записва се като force=True."""
+        kwargs.pop("force", None)
+        return self(post_dir, client, force=True, revision=instruction, **kwargs)
 
 class FakeClient:
     """
@@ -127,6 +141,7 @@ def make_repl(
         # безобиден страничен ефект в тестовете; отварянето на приложение не е.
         open_preview_fn=lambda path: None,
         today=date(2026, 8, 11),
+        revision_fn=pipeline.revise,
     )
     return repl, output
 
@@ -191,6 +206,50 @@ def test_bare_photo_paths_returns_none_when_any_token_is_plain_text(tmp_path):
 
 def test_bare_photo_paths_returns_none_for_empty_line():
     assert bare_photo_paths("   ") is None
+
+def test_bare_photo_paths_accepts_powershell_drag_and_drop(tmp_path):
+    """PowerShell вмъква провлачен файл като `& 'път'` — единични кавички и `&` отпред."""
+    photo = tmp_path / "Screenshot (2).png"
+    photo.write_bytes(b"x")
+
+    assert bare_photo_paths(f"& '{photo}'") == [photo]
+    assert bare_photo_paths(f"'{photo}'") == [photo]
+
+def test_extract_inline_attachments_takes_photo_dragged_into_brief_in_powershell(tmp_path):
+    """Реален случай (2026-10-13): бриф + провлачена снимка на същия ред, без @ — пътят
+    заминаваше към модела като текст, а постът излизаше „без снимки"."""
+    folder = tmp_path / "OneDrive - Research Metrics"
+    folder.mkdir()
+    photo = folder / "Screenshot (2).png"
+    photo.write_bytes(b"x")
+
+    text, found, unresolved = extract_inline_attachments(f"днес клъстерът проведе среща с Pydantic & '{photo}'")
+
+    assert found == [photo]
+    assert text == "днес клъстерът проведе среща с Pydantic"
+    assert unresolved == []
+
+def test_extract_inline_attachments_takes_dragged_photo_in_double_quotes_or_bare(tmp_path):
+    a = tmp_path / "a b.jpg"
+    b = tmp_path / "c.png"
+    a.write_bytes(b"x")
+    b.write_bytes(b"x")
+
+    text, found, _ = extract_inline_attachments(f'Среща "{a}" {b} с партньори')
+
+    assert found == [a, b]
+    assert text == "Среща с партньори"
+
+def test_extract_inline_attachments_leaves_ampersand_quotes_and_relative_names_as_text(tmp_path, monkeypatch):
+    """`&` и кавички в брифа са нормален текст; относително име на файл не е провлачване."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "снимка.jpg").write_bytes(b"x")
+    brief = "Среща с PIDANTIC & партньори, тема 'AI в бизнеса' и снимка.jpg"
+
+    text, found, _ = extract_inline_attachments(brief)
+
+    assert found == []
+    assert text == brief
 
 # --------------------------------------------------------------------------- поток
 
@@ -321,7 +380,9 @@ def test_revise_appends_to_same_briefing_and_forces_rerun(tmp_path):
 
     assert len(pipeline.calls) == 2
     assert pipeline.calls[0]["post_dir"] == pipeline.calls[1]["post_dir"]  # същата папка, не нов пост
-    assert pipeline.calls[1]["force"] is True  # брифът се промени → планът също трябва
+    assert pipeline.calls[1]["force"] is True
+    # research-plan-36, Б2: лека ревизия — инструкцията стига до Писателя заедно с готовия пост
+    assert pipeline.calls[1]["revision"] == "по-кратко, без клишета"
     briefing = (pipeline.calls[0]["post_dir"] / "briefing.md").read_text(encoding="utf-8")
     assert "Бележка за ревизия 1" in briefing
     assert "по-кратко, без клишета" in briefing
@@ -345,7 +406,7 @@ def test_revise_instruction_overrides_sticky_mode_for_that_run_only(tmp_path):
     assert pipeline.calls[0]["mode"] == "panorama"  # първият пост — sticky режимът
     assert pipeline.calls[1]["mode"] == "fokus"  # ревизията — едно стъпало надолу, само тук
     assert pipeline.calls[2]["mode"] == "panorama"  # следващият НОВ пост — sticky остава непипнат
-    assert any("Фокус само за тази ревизия" in line for line in output)
+    assert any("Фокус само за тази промяна" in line for line in output)
 
 
 def test_revise_instruction_without_length_signal_keeps_sticky_mode(tmp_path):
@@ -384,8 +445,7 @@ def test_agent_error_is_shown_as_sentence_not_traceback(tmp_path):
     assert repl.run() == 0  # грешката в един пост не сваля сесията
 
     text = "\n".join(output)
-    assert "Спряно:" in text
-    assert "briefing.md" in text
+    assert "✗ Липсва или е празен briefing.md" in text
     assert "Traceback" not in text
 
 def test_insufficient_brief_prompt_is_skipped_for_a_normal_result(tmp_path):
@@ -444,7 +504,8 @@ def test_text_from_an_interrupted_run_is_still_shown(tmp_path):
     text = "\n".join(output)
     assert "Недовършен текст." in text
     assert "прекъснато пускане" in text
-    assert "Спряно:" in text
+    assert "сървърът с езиковите модели не отговаря" in text.lower()
+    assert "някакъв-модел" not in text  # research-plan-36, В7: ID на модела само в run.log
 
 def test_unexpected_error_does_not_end_the_session(tmp_path):
     pipeline = FakePipeline(raises=OSError("диск пълен"))
@@ -453,7 +514,8 @@ def test_unexpected_error_does_not_end_the_session(tmp_path):
     assert repl.run() == 0
 
     text = "\n".join(output)
-    assert "Неочаквана грешка: OSError" in text
+    assert "Нещо се обърка неочаквано" in text
+    assert "OSError: диск пълен" in text
     assert len(pipeline.calls) == 2  # сесията продължава след счупения пост
 
 def test_warnings_are_printed_after_the_post(tmp_path):
@@ -632,6 +694,7 @@ def test_progress_lines_reach_the_console_during_a_run(tmp_path):
 
     repl, output = make_repl(tmp_path, FakePipeline(), ["Бриф"])
     repl.pipeline_fn = pipeline_with_logging
+    repl.state.verbose = True  # технически изглед (/подробно) — research-plan-36, В1
     repl.run()
 
     text = "\n".join(output)
@@ -824,7 +887,7 @@ def test_successful_post_is_copied_to_clipboard(tmp_path):
     repl.run()
 
     assert copied == ["Готов пост."]
-    assert any("копирано в клипборда" in line for line in output)
+    assert any("Текстът е копиран" in line for line in output)
 
 
 def test_clipboard_failure_does_not_break_the_session_or_claim_success(tmp_path):
@@ -833,7 +896,7 @@ def test_clipboard_failure_does_not_break_the_session_or_claim_success(tmp_path)
 
     repl.run()  # не бива да хвърли изключение
 
-    assert not any("копирано в клипборда" in line for line in output)
+    assert not any("Текстът е копиран" in line for line in output)
 
 
 def test_late_final_check_notes_are_printed_when_they_arrive(tmp_path):
@@ -850,7 +913,7 @@ def test_late_final_check_notes_are_printed_when_they_arrive(tmp_path):
 
     repl.run()
 
-    assert any("async" in line for line in output)
+    assert any("Окончателната проверка" in line for line in output)
     assert any("клише в предложението" in line for line in output)  # отделен ред — бележките се изреждат под хедъра
 
 
@@ -861,7 +924,7 @@ def test_late_final_check_with_no_notes_reports_clean(tmp_path):
 
     repl.run()
 
-    assert any("async" in line and "завърши чисто" in line for line in output)
+    assert any("Окончателната проверка" in line and "няма нови бележки" in line for line in output)
 
 
 def test_late_final_check_failure_is_reported_not_silently_dropped(tmp_path):
@@ -871,7 +934,8 @@ def test_late_final_check_failure_is_reported_not_silently_dropped(tmp_path):
 
     repl.run()
 
-    assert any("async" in line and "модел недостъпен" in line for line in output)
+    # Технически детайл само в /подробно; по подразбиране — че проверката не е успяла.
+    assert any("Окончателната проверка" in line and "не успя" in line for line in output)
 
 
 def test_interrupted_run_does_not_attempt_to_copy_an_empty_clipboard(tmp_path):
@@ -948,7 +1012,7 @@ def test_env_setup_writes_env_from_example_with_the_provided_key(tmp_path):
     written = env_path.read_text(encoding="utf-8")
     assert "OPENWEBUI_API_KEY=tайна-стойност" in written
     assert "MODEL_WRITER=some-model" in written
-    assert any("Записан" in line for line in output)
+    assert any("записан" in line for line in output)
 
 
 def test_env_setup_can_be_declined(tmp_path):
@@ -985,6 +1049,12 @@ def test_split_path_args_supports_quoted_paths_with_spaces():
     from src.repl import split_path_args
 
     assert split_path_args('"C:\снимки папка\a.jpg" b.jpg') == ["C:\снимки папка\a.jpg", "b.jpg"]
+
+
+def test_split_path_args_supports_powershell_single_quotes_and_call_operator():
+    from src.repl import split_path_args
+
+    assert split_path_args("& 'C:\\снимки папка\\a.jpg' O'Neil.jpg") == ["C:\\снимки папка\\a.jpg", "O'Neil.jpg"]
 
 
 # --------------------------------------------------------------------------- тънък бриф (План 24)
@@ -1028,7 +1098,7 @@ def test_thin_brief_precheck_asks_a_question_when_planner_flags_it_as_thin(tmp_p
 
     repl.run()
 
-    assert any("тънък бриф" in prompt for prompt in asked)
+    assert any("доста кратък" in prompt for prompt in asked)
     # Enter (празен отговор) -> брифът остава непроменен, run_pipeline не се форсира.
     assert pipeline.calls[0]["force"] is False
     briefing = (pipeline.calls[0]["post_dir"] / "briefing.md").read_text(encoding="utf-8")
@@ -1121,6 +1191,6 @@ def test_thin_brief_precheck_does_not_run_for_again_or_revise(tmp_path):
     repl.run()
 
     # Едно "тънък бриф" питане общо (само за първоначалния бриф, не и за /again).
-    assert sum(1 for prompt in asked if "тънък бриф" in prompt) == 1
+    assert sum(1 for prompt in asked if "доста кратък" in prompt) == 1
     assert len(pipeline.calls) == 2
     assert pipeline.calls[1]["force"] is True  # /again винаги force, независимо от precheck-а

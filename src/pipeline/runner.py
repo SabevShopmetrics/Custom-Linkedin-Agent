@@ -71,12 +71,13 @@ from pathlib import Path
 from typing import Any
 
 from src.brand.loader import BrandKnowledge, load_brand_knowledge
-from src.errors import AgentError, BriefingMissingError, BriefingNotFilledError
+from src.errors import AgentError, BriefingMissingError, BriefingNotFilledError, CancelledByUserError
 from src.llm.client import LLMClient
 from src.logging_utils import setup_run_logger
 from src.pipeline import consolidator, critic, facts_pool, formatting, judge, media_picker, modes, planner, verifier, writer
 from src.pipeline.consolidator import PipelineResult
 from src.pipeline.util import read_json, read_text_or_none, write_json, write_text
+from src.quality.metrics import measure
 
 EXAMPLE_BRIEFING_PATH = Path("posts/_example/briefing.md")
 
@@ -160,6 +161,52 @@ def _ai_act_meta() -> dict:
     }
 
 
+def _check_cancel(should_cancel: Callable[[], bool] | None, log) -> None:
+    """
+    Граница между две стъпки — единственото място, където Ctrl+C от човека спира конвейера
+    (research-plan-36, А7). Текущото извикване към модела не може да бъде прекъснато по средата
+    (блокиращ HTTP), но следващото вече не тръгва. Преди: Ctrl+C спираше само чакането на екрана,
+    а фоновата нишка продължаваше да вика модели и да печата.
+    """
+    if should_cancel is not None and should_cancel():
+        log.info("Спряно от човека (Ctrl+C) — следващите стъпки не тръгват.")
+        raise CancelledByUserError()
+
+
+def _notify_draft(on_draft: Callable[[str], None] | None, text: str, log) -> None:
+    """Б1 (research-plan-36): показва Post I на човека веднага, докато проверката тече."""
+    if on_draft is None or not text.strip():
+        return
+    try:
+        on_draft(text.strip())
+    except Exception as exc:  # показването е удобство — никога не спира конвейера
+        log.warning("Черновата не можа да се покаже: %s: %s", type(exc).__name__, exc)
+
+
+# Г3 (research-plan-36): прагове за бележката „финалът изгуби конкретика". Двата заедно, за да
+# не гърми при малки разлики (едно махнато име без съгласие е нормално, не загуба).
+_FACT_LOSS_MIN_ABSOLUTE = 3
+_FACT_LOSS_MAX_RATIO = 0.75
+
+
+def _fact_loss_note(post_i_text: str, final_text: str) -> str | None:
+    """
+    Базовата линия (bench/baseline-pre-phase0.json) показа, че в 7 от 20 пускания финалният
+    текст има по-малко факти от първата чернова — Post II/Консолидаторът „изглаждат" конкретиката.
+    Бенчът го мереше, но човекът никога не го виждаше. Тук е бележка, не автоматичен избор на
+    черновата: част от загубата е нарочна (махнати имена без съгласие, недоказани твърдения).
+    """
+    before = measure(post_i_text).facts
+    after = measure(final_text).facts
+    lost = before - after
+    if lost >= _FACT_LOSS_MIN_ABSOLUTE and after < before * _FACT_LOSS_MAX_RATIO:
+        return (
+            f"Финалният текст има {lost} по-малко конкретни детайла (имена, числа, дати) от първата "
+            f"чернова — ако нещо важно е отпаднало, вижте черновата с /чернова и го върнете с ревизия."
+        )
+    return None
+
+
 def _is_unfilled_template(briefing_text: str, template_path: Path = EXAMPLE_BRIEFING_PATH) -> bool:
     """
     Точно сравнение срещу posts/_example/briefing.md — хваща най-честия случай (`new` без
@@ -183,6 +230,8 @@ def run_pipeline(
     today: date | None = None,
     wait_for_final_check_seconds: float = 0.0,
     on_final_check: Callable[[FinalCheckUpdate], None] | None = None,
+    on_draft: Callable[[str], None] | None = None,
+    should_cancel: Callable[[], bool] | None = None,
 ) -> PipelineResult:
     """
     Валидира входа (общо за двете вериги), после разклонява на v3 (подразбиране) или v5
@@ -214,7 +263,14 @@ def run_pipeline(
     покажат закъснялата бележка на екрана вместо тя да остане само в meta.json, невидяна
     без ръчна проверка (документираното ограничение по-горе). CLI `generate` не го подава —
     там `wait_for_final_check_seconds` вече решава същия проблем синхронно.
+
+    `on_draft` (research-plan-36, Б1): извиква се с текста на Post I веднага щом е написан —
+    човекът чете чернова след ~1 минута, вместо да гледа празен екран 3–7 минути, докато
+    Критик → Post II → Консолидатор работят. Само v3; v5 няма една чернова преди Съдията.
+
+    `should_cancel` (research-plan-36, А7): проверява се между стъпките; True → CancelledByUserError.
     """
+    started = time.monotonic()
     log = setup_run_logger(post_dir)
     mode_obj = modes.get_mode(mode)
 
@@ -252,6 +308,8 @@ def run_pipeline(
             today=today,
             wait_for_final_check_seconds=wait_for_final_check_seconds,
             on_final_check=on_final_check,
+            should_cancel=should_cancel,
+            started=started,
         )
     return _run_pipeline_v3(
         post_dir,
@@ -264,6 +322,9 @@ def run_pipeline(
         today=today,
         wait_for_final_check_seconds=wait_for_final_check_seconds,
         on_final_check=on_final_check,
+        on_draft=on_draft,
+        should_cancel=should_cancel,
+        started=started,
     )
 
 
@@ -282,7 +343,11 @@ def _run_pipeline_v3(
     today: date | None = None,
     wait_for_final_check_seconds: float = 0.0,
     on_final_check: Callable[[FinalCheckUpdate], None] | None = None,
+    on_draft: Callable[[str], None] | None = None,
+    should_cancel: Callable[[], bool] | None = None,
+    started: float | None = None,
 ) -> PipelineResult:
+    started = started if started is not None else time.monotonic()
     warnings: list[str] = []
     open_notes: list[str] = []
     effective_rules = _effective_format_rules(knowledge, mode)
@@ -306,6 +371,7 @@ def _run_pipeline_v3(
             log.info("[1] бележка на Планера: %s", plan.notes)
         if plan.requires_topic_replacement:
             log.info("[1] темата на брифа нарушава ЗАБРАНЕНО — нужен е нов повод от човек.")
+        _check_cancel(should_cancel, log)
 
         # Критик/Post II се пропускат при insufficient_brief (виж research-plan-18/19) И при
         # requires_topic_replacement (виж research-plan-26-forbidden-topics-and-numeric-
@@ -339,6 +405,11 @@ def _run_pipeline_v3(
         )
         for item in media_selection.selected:
             log.info("[2]/[3] снимка: %s — %s", item.filename, item.reason)
+        if not skip_critic_and_second_post:
+            # Само ако следват подобрения — иначе Post I Е окончателният текст и се показва
+            # веднъж, като предложение, не два пъти.
+            _notify_draft(on_draft, post_i_text, log)
+        _check_cancel(should_cancel, log)
 
         # [4] Критик върху Post I — намира какво да запълни вторият пост. Пропуска се
         # изцяло, когато Планерът е маркирал брифа като лишен от реално съдържание (виж
@@ -408,6 +479,7 @@ def _run_pipeline_v3(
             log.info("[4] присъда: %s · %d находки за запълване", critique.verdict.value, len(findings))
             for finding in findings:
                 log.info("[4] находка: %s", finding)
+        _check_cancel(should_cancel, log)
     except AgentError as exc:
         log.error("Спряно: %s", exc.human_message)
         if exc.detail:
@@ -440,6 +512,7 @@ def _run_pipeline_v3(
             log.error("[5] Post II се счупи: %s", exc.human_message)
     else:
         log.info("[5] Пропуснат — Критикът не намери какво да се запълва.")
+    _check_cancel(should_cancel, log)
 
     # [6] Консолидатор — официалното предложение от двата поста
     log.info("[6] Консолидатор (%s)...", "Post I + Post II" if post_ii_text else "само Post I")
@@ -501,6 +574,12 @@ def _run_pipeline_v3(
     for note in formatted.notes:
         log.info("[6б] бележка: %s", note)
     open_notes.extend(formatted.notes)
+
+    if post_ii_text:
+        loss_note = _fact_loss_note(post_i_text, official_text)
+        if loss_note:
+            open_notes.append(loss_note)
+            log.warning("[6б] %s", loss_note)
 
     if any(item.possible_minor for item in media_selection.selected):
         warning_text = (
@@ -566,6 +645,7 @@ def _run_pipeline_v3(
         extra_meta={
             **_ai_act_meta(),
             "final_check": {"status": "skipped"} if skip_critic_and_second_post else {"status": "pending"},
+            "pipeline_seconds": round(time.monotonic() - started, 1),
         },
     )
 
@@ -612,12 +692,15 @@ def _run_pipeline_v5(
     today: date | None = None,
     wait_for_final_check_seconds: float = 0.0,
     on_final_check: Callable[[FinalCheckUpdate], None] | None = None,
+    should_cancel: Callable[[], bool] | None = None,
+    started: float | None = None,
 ) -> PipelineResult:
     """
     Виж докстринга на модула за схемата. Разлика от v3, накратко: няма Post II/Консолидатор
     цикъл, който пренаписва — има N независими кандидата, код-ниво филтър за проследимост,
     и Съдия, който избира. Стъпка [7] тук е информативна, както в v3, но тече асинхронно.
     """
+    started = started if started is not None else time.monotonic()
     warnings: list[str] = []
     open_notes: list[str] = []
     config = client.config  # само v5 стигна дотук, значи client.config съществува (виж run_pipeline)
@@ -642,6 +725,7 @@ def _run_pipeline_v5(
             len(pool.briefing_claims),
             len(pool.mentionable_members),
         )
+        _check_cancel(should_cancel, log)
 
         # [2]/[3] Писател × N кандидата + Media Picker — паралелно.
         log.info("[2]/[3] Писател × %d кандидата + Media Picker (паралелно)...", n)
@@ -667,6 +751,7 @@ def _run_pipeline_v5(
             log.info("[2]/[3] %s: %d думи", filename, len(text.split()))
         for item in media_selection.selected:
             log.info("[2]/[3] снимка: %s — %s", item.filename, item.reason)
+        _check_cancel(should_cancel, log)
 
         # [4] Филтър за проследимост — код (факти/GDPR) + лека паралелна LLM проверка само
         # за rules/forbidden.md на всеки кандидат (виж докстринга на verifier.py защо това
@@ -770,7 +855,11 @@ def _run_pipeline_v5(
         merged_from=merged_from,
         applied_fixes=applied_fixes,
         resolution_summary=None,
-        extra_meta={**_ai_act_meta(), "final_check": {"status": "pending"}},
+        extra_meta={
+            **_ai_act_meta(),
+            "final_check": {"status": "pending"},
+            "pipeline_seconds": round(time.monotonic() - started, 1),
+        },
     )
 
     # [7] Финален критик — АСИНХРОННО (план 15, Част 4/1.1: тази стъпка сама изяжда ~70s в
@@ -783,6 +872,232 @@ def _run_pipeline_v5(
         result = _await_final_check(thread, post_dir, result, wait_for_final_check_seconds, log)
 
     return result
+
+
+# ============================================================================ лека ревизия (Б2)
+
+
+def _photo_notes(media_selection) -> tuple[list[str], list[str]]:
+    """(open_notes, warnings) за избраните снимки — същите текстове като в v3/v5 по-горе."""
+    notes: list[str] = []
+    warnings: list[str] = []
+    if any(item.possible_minor for item in media_selection.selected):
+        warnings.append(
+            "Избрана снимка е маркирана от Media Picker като вероятно съдържаща непълнолетни лица — "
+            "прегледайте ръчно преди публикуване."
+        )
+    for item in media_selection.selected:
+        if item.topical_mismatch:
+            reason_suffix = f": {item.mismatch_reason}" if item.mismatch_reason else ""
+            notes.append(
+                f"Media Picker флагна '{item.filename}' като вероятно несъответстваща тематично "
+                f"на брифа{reason_suffix} — прегледайте дали снимката пасва."
+            )
+    return notes, warnings
+
+
+def _archive_current_post(post_dir: Path) -> Path | None:
+    """
+    Пази предишния вариант като output/post.vN.md, преди ревизията да го презапише. Досега
+    докстрингът на /revise твърдеше, че „всеки междинен вариант остава", а текстът се губеше.
+    """
+    current = post_dir / "output" / "post.md"
+    if not current.exists():
+        return None
+    number = 1
+    while (post_dir / "output" / f"post.v{number}.md").exists():
+        number += 1
+    target = post_dir / "output" / f"post.v{number}.md"
+    target.write_text(current.read_text(encoding="utf-8"), encoding="utf-8")
+    return target
+
+
+def run_revision(
+    post_dir: Path,
+    client: LLMClient,
+    instruction: str,
+    *,
+    knowledge: BrandKnowledge | None = None,
+    mode: str | None = None,
+    today: date | None = None,
+    wait_for_final_check_seconds: float = 0.0,
+    on_final_check: Callable[[FinalCheckUpdate], None] | None = None,
+    should_cancel: Callable[[], bool] | None = None,
+) -> PipelineResult:
+    """
+    Лека ревизия на вече готов пост (research-plan-36, Б2): Писателят редактира output/post.md
+    по молбата на човека с ЕДНО извикване; механичните правила (formatting.enforce) и фоновата
+    финална проверка [7] се прилагат както при пълното пускане. Планът и изборът на снимки се
+    преизползват от диска (plan.json / media.json) — без нови извиквания.
+
+    Пада към пълното пускане (run_pipeline, force=True), когато лекият път няма смисъл:
+    няма готов пост, или Планерът е маркирал брифа като недостатъчен / със забранена тема —
+    тогава постът е честен отказ, не текст за редактиране, а новата информация в молбата
+    изисква нов план.
+    """
+    started = time.monotonic()
+    briefing_text = read_text_or_none(post_dir / "briefing.md")
+    current_post = read_text_or_none(post_dir / "output" / "post.md")
+    plan_path = post_dir / "plan.json"
+    if knowledge is None:
+        knowledge = load_brand_knowledge()
+
+    def full_rerun() -> PipelineResult:
+        return run_pipeline(
+            post_dir,
+            client,
+            force=True,
+            knowledge=knowledge,
+            mode=mode,
+            today=today,
+            wait_for_final_check_seconds=wait_for_final_check_seconds,
+            on_final_check=on_final_check,
+            should_cancel=should_cancel,
+        )
+
+    if not briefing_text or not current_post or not current_post.strip() or not plan_path.exists():
+        return full_rerun()
+    try:
+        plan = planner.run(post_dir, client, knowledge.stable_context, briefing_text, force=False)
+    except AgentError:
+        return full_rerun()
+    if plan.insufficient_brief or plan.requires_topic_replacement:
+        return full_rerun()
+
+    log = setup_run_logger(post_dir)
+    mode_obj = modes.get_mode(mode)
+    log.info("=== Лека ревизия на '%s' (режим=%s) ===", post_dir, mode_obj.label)
+    log.info("[Р] Молба: %s", instruction)
+
+    try:
+        media_selection, no_photos = media_picker.run(post_dir, client, plan, briefing_text, force=False)
+        _check_cancel(should_cancel, log)
+        log.info("[Р] Писателят редактира готовия пост...")
+        revised = writer.revise_post(
+            client,
+            knowledge,
+            briefing_text,
+            current_post.strip(),
+            instruction,
+            mode_instruction=mode_obj.instruction,
+        )
+    except AgentError as exc:
+        log.error("Спряно: %s", exc.human_message)
+        if exc.detail:
+            log.error("Причина (техническа подробност): %s", exc.detail)
+        raise
+
+    archived = _archive_current_post(post_dir)
+    if archived is not None:
+        log.info("[Р] Предишният вариант е запазен като %s", archived.name)
+
+    founded_year = (knowledge.facts or {}).get("organization", {}).get("founded")
+    formatted = formatting.enforce(
+        revised,
+        _effective_format_rules(knowledge, mode_obj),
+        brief_text=briefing_text,
+        has_photos=bool(media_selection.selected),
+        founded_year=founded_year,
+        today=today,
+    )
+    official_text = formatted.text.strip()
+    write_text(post_dir / "output" / "post.md", official_text + "\n")
+    for fix in formatted.fixes:
+        log.info("[Р] Поправено автоматично: %s", fix)
+    log.info("[Р] Ревизиран пост: %d думи", len(official_text.split()))
+
+    open_notes = list(formatted.notes)
+    photo_notes, warnings = _photo_notes(media_selection)
+    open_notes.extend(photo_notes)
+    if plan.is_sensitive:
+        open_notes.append(
+            "ЧУВСТВИТЕЛНА ТЕМА — Планерът прецени, че тя изисква преглед и одобрение преди "
+            "публикуване. Прегледайте лично, дори ако няма други бележки по-долу."
+        )
+    status = "ready_with_notes" if (open_notes or warnings) else "ready"
+
+    result = consolidator.finalize(
+        post_dir,
+        client,
+        plan,
+        media_selection,
+        no_photos=no_photos,
+        status=status,
+        open_notes=open_notes,
+        warnings=warnings,
+        merged_from=["ревизия"],
+        applied_fixes=formatted.fixes,
+        extra_meta={
+            **_ai_act_meta(),
+            "final_check": {"status": "pending"},
+            "pipeline_seconds": round(time.monotonic() - started, 1),
+            "revision": {"instruction": instruction, "previous": archived.name if archived else None},
+        },
+    )
+
+    log.info("[7] Критик върху ревизирания текст (async, информативно)...")
+    thread = _start_async_final_check(
+        post_dir, client, knowledge, plan, briefing_text, official_text, on_final_check=on_final_check
+    )
+    if wait_for_final_check_seconds > 0:
+        result = _await_final_check(thread, post_dir, result, wait_for_final_check_seconds, log)
+    return result
+
+
+def refresh_photos(
+    post_dir: Path,
+    client: LLMClient,
+    *,
+    knowledge: BrandKnowledge | None = None,
+) -> PipelineResult:
+    """
+    В4 (research-plan-36): снимки, добавени СЛЕД като постът е готов. Само Media Picker избира
+    наново (едно извикване); текстът не се пипа. Досега снимка, прикачена след поста, тихо
+    чакаше следващия пост, а /revise я игнорираше.
+    """
+    if knowledge is None:
+        knowledge = load_brand_knowledge()
+    briefing_text = read_text_or_none(post_dir / "briefing.md") or ""
+    meta_path = post_dir / "output" / "meta.json"
+    try:
+        old_meta = read_json(meta_path)
+    except (OSError, ValueError):
+        old_meta = {}
+    log = setup_run_logger(post_dir)
+    log.info("=== Нов избор на снимки за '%s' ===", post_dir)
+
+    plan = planner.run(post_dir, client, knowledge.stable_context, briefing_text, force=False)
+    media_selection, no_photos = media_picker.run(post_dir, client, plan, briefing_text, force=True)
+    for item in media_selection.selected:
+        log.info("[3] снимка: %s — %s", item.filename, item.reason)
+
+    selected_dir = post_dir / "output" / "selected"
+    if selected_dir.is_dir():
+        for old in selected_dir.iterdir():
+            if old.is_file():
+                old.unlink()
+
+    # Бележките за текста остават; бележките за снимките се сменят с новите.
+    kept_notes = [note for note in old_meta.get("open_notes", []) if not note.startswith("Media Picker флагна")]
+    photo_notes, warnings = _photo_notes(media_selection)
+    open_notes = kept_notes + photo_notes
+    status = "ready_with_notes" if (open_notes or warnings) else "ready"
+
+    extra = {key: old_meta[key] for key in ("ai_act", "final_check", "pipeline_seconds", "revision") if key in old_meta}
+    return consolidator.finalize(
+        post_dir,
+        client,
+        plan,
+        media_selection,
+        no_photos=no_photos,
+        status=status,
+        open_notes=open_notes,
+        warnings=warnings,
+        merged_from=list(old_meta.get("merged_from", [])),
+        applied_fixes=list(old_meta.get("applied_fixes", [])),
+        resolution_summary=old_meta.get("resolution_summary"),
+        extra_meta=extra,
+    )
 
 
 def _start_async_final_check(
@@ -841,7 +1156,11 @@ def _start_async_final_check(
                 briefing_text,
                 official_text,
                 filename=FINAL_CRITIQUE_FILENAME,
-                force=False,
+                # force=True (research-plan-36, А3): с force=False след /revise или /again
+                # стъпката намираше critique_final.md от ПРЕДИШНОТО пускане и връщаше неговите
+                # бележки за текст, който вече не съществува. Стъпката е фонова и информативна —
+                # едно извикване повече при възобновяване е по-евтино от грешни бележки.
+                force=True,
             )
             final_notes = critic.review_notes(final_critique)
             _append_run_log(log_path, f"[7] {len(final_notes)} открити въпроса в предложението (async)")

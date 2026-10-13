@@ -25,7 +25,7 @@ import requests
 from pydantic import BaseModel
 
 from src.config import Config
-from src.errors import ImageTooLargeError, InvalidResponseError, ModelUnavailableError
+from src.errors import AuthenticationError, ImageTooLargeError, InvalidResponseError, ModelUnavailableError
 from src.llm.roles import Role, fallback_chain, model_for_role, supports_vision
 from src.llm.schema import parse_structured
 
@@ -57,6 +57,10 @@ class CallLogEntry:
     attempts: int
     used_fallback: bool = False
     error: str | None = None
+    # Брой HTTP заявки (вкл. мрежови повторни опити и резервни модели). `attempts` при
+    # структуриран изход брои само поправящите JSON кръгове — без това поле таймаутите и
+    # мрежовите повторения бяха невидими в meta.json (research-plan-36, А8).
+    network_attempts: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -65,6 +69,7 @@ class CallLogEntry:
             "duration_seconds": round(self.duration_seconds, 2),
             "success": self.success,
             "attempts": self.attempts,
+            "network_attempts": self.network_attempts,
             "used_fallback": self.used_fallback,
             "error": self.error,
         }
@@ -138,7 +143,15 @@ class LLMClient:
                 text, network_attempts, used_fallback = self._call_with_network_retry(
                     role, model, messages, temperature
                 )
-                self._log(role, model, started, success=True, attempts=network_attempts, used_fallback=used_fallback)
+                self._log(
+                    role,
+                    model,
+                    started,
+                    success=True,
+                    attempts=network_attempts,
+                    used_fallback=used_fallback,
+                    network_attempts=network_attempts,
+                )
                 return text
 
             # 2б. Със схема — структуриран изход: всеки опит вика модела (с мрежов retry
@@ -149,14 +162,22 @@ class LLMClient:
             max_correction_attempts = self._config.invalid_response_max_retries
 
             for correction_attempt in range(max_correction_attempts + 1):
-                text, net_attempts, fb = self._call_with_network_retry(role, model, current_messages, temperature)
+                text, net_attempts, fb = self._call_with_network_retry(
+                    role, model, current_messages, temperature, schema=schema
+                )
                 network_attempts += net_attempts
                 used_fallback = used_fallback or fb
                 attempts_used += 1
                 try:
                     parsed = parse_structured(text, schema)
                     self._log(
-                        role, model, started, success=True, attempts=attempts_used, used_fallback=used_fallback
+                        role,
+                        model,
+                        started,
+                        success=True,
+                        attempts=attempts_used,
+                        used_fallback=used_fallback,
+                        network_attempts=network_attempts,
                     )
                     return parsed
                 except ValueError as exc:
@@ -185,10 +206,11 @@ class LLMClient:
                 attempts=attempts_used,
                 used_fallback=used_fallback,
                 error=last_error,
+                network_attempts=network_attempts,
             )
             raise InvalidResponseError(role.value, model, attempts_used, detail=last_error)
 
-        except ModelUnavailableError as exc:
+        except (ModelUnavailableError, AuthenticationError) as exc:
             self._log(
                 role,
                 model,
@@ -251,6 +273,9 @@ class LLMClient:
             # "content" списък от текст + image_url части вместо чист низ.
             content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
             for image_path in images:
+                # Името пред всяка снимка: без него моделът свързва имената по реда им и бърка
+                # (реално пускане 2026-10-13: скрийншот от терминал описан като „3D план на залата").
+                content.append({"type": "text", "text": f"Снимка „{image_path.name}“:"})
                 content.append({"type": "image_url", "image_url": {"url": self._encode_image(image_path)}})
             messages.append({"role": "user", "content": content})
         else:
@@ -307,7 +332,13 @@ class LLMClient:
         raise ImageTooLargeError(image_path.name, len(candidate), limit)
 
     def _call_with_network_retry(
-        self, role: Role, model: str, messages: list[dict[str, Any]], temperature: float | None = None
+        self,
+        role: Role,
+        model: str,
+        messages: list[dict[str, Any]],
+        temperature: float | None = None,
+        *,
+        schema: type[BaseModel] | None = None,
     ) -> tuple[str, int, bool]:
         """
         Retry с нарастващо изчакване на основния модел, после по един опит с всеки
@@ -324,9 +355,15 @@ class LLMClient:
         for attempt in range(self._config.model_max_retries):
             attempts += 1
             try:
-                return self._post_chat(model, messages, temperature), attempts, False
+                return self._post_chat(model, messages, temperature, role=role, schema=schema), attempts, False
             except Exception as exc:  # мрежов/модел проблем — опитваме пак
+                _raise_if_auth_error(exc)
                 last_exc = exc
+                if isinstance(exc, requests.ReadTimeout):
+                    # Изтекло време за ОТГОВОР (не за свързване) не е моментен срив: същата заявка към същия модел генерира
+                    # същия дълъг отговор и изтича пак. На живо 2026-10-13 Критикът изгори
+                    # 3 × 120 s така, преди резервният модел да отговори за 63 s.
+                    break
                 if attempt < self._config.model_max_retries - 1:
                     self._sleep(2**attempt)
 
@@ -337,8 +374,9 @@ class LLMClient:
                 continue
             attempts += 1
             try:
-                return self._post_chat(fb_model, messages, temperature), attempts, True
+                return self._post_chat(fb_model, messages, temperature, role=role, schema=schema), attempts, True
             except Exception as exc:
+                _raise_if_auth_error(exc)
                 last_exc = exc
 
         # Нито основният, нито някой резервен модел отговори — цялата верига да гърми оттук.
@@ -362,19 +400,54 @@ class LLMClient:
             payload["max_tokens"] = self._config.max_tokens
         return payload
 
+    def _optional_payload(self, role: Role | None, schema: type[BaseModel] | None) -> dict[str, Any]:
+        """
+        Две опционални ускорявания (research-plan-36, Б3/Б4), И ДВЕТЕ изключени по подразбиране —
+        не е потвърдено, че бекендът зад Open WebUI ги поддържа. `python -m src.cli spike` ги
+        мери на живо, преди някой да ги включи в .env:
+
+          NO_THINKING_ROLES=planner,...  → `chat_template_kwargs.enable_thinking=false` (Qwen3 /
+                                            vLLM / SGLang) — моделът не пише скрити разсъждения.
+          STRUCTURED_OUTPUT=json_schema  → `response_format` с JSON схемата на ролята —
+                                            декодерът гарантира валиден JSON от първия опит.
+        """
+        payload: dict[str, Any] = {}
+        if role is not None and role.value in self._config.no_thinking_roles:
+            payload["chat_template_kwargs"] = {"enable_thinking": False}
+        if schema is not None and self._config.structured_output == "json_schema":
+            payload["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {"name": schema.__name__, "schema": schema.model_json_schema()},
+            }
+        return payload
+
     def _post_chat(
-        self, model: str, messages: list[dict[str, Any]], temperature: float | None = None
+        self,
+        model: str,
+        messages: list[dict[str, Any]],
+        temperature: float | None = None,
+        *,
+        role: Role | None = None,
+        schema: type[BaseModel] | None = None,
+        extra: dict[str, Any] | None = None,
     ) -> str:
         # Единственото мрежово извикване в целия проект — стандартен OpenAI-съвместим
         # chat/completions endpoint. raise_for_status() превръща 4xx/5xx в изключение,
         # което _call_with_network_retry хваща и опитва пак/минава на fallback.
+        body = {
+            "model": model,
+            "messages": messages,
+            **self._sampling_payload(temperature),
+            **self._optional_payload(role, schema),
+            **(extra or {}),
+        }
         response = requests.post(
             f"{self._config.openwebui_base_url}/chat/completions",
             headers={
                 "Authorization": f"Bearer {self._config.openwebui_api_key}",
                 "Content-Type": "application/json",
             },
-            json={"model": model, "messages": messages, **self._sampling_payload(temperature)},
+            json=body,
             timeout=self._config.request_timeout_seconds,
         )
         response.raise_for_status()
@@ -394,6 +467,7 @@ class LLMClient:
         attempts: int,
         used_fallback: bool,
         error: str | None = None,
+        network_attempts: int = 0,
     ) -> None:
         self.call_log.append(
             CallLogEntry(
@@ -404,5 +478,18 @@ class LLMClient:
                 attempts=attempts,
                 used_fallback=used_fallback,
                 error=error,
+                network_attempts=network_attempts or attempts,
             )
         )
+
+
+def _raise_if_auth_error(exc: Exception) -> None:
+    """
+    HTTP 401/403 → AuthenticationError веднага, без повторни опити и резервни модели: същият
+    ключ ще бъде отхвърлен от всеки модел (research-plan-36, А5). Всичко останало (таймаут,
+    5xx, мрежа) продължава по стария път с повторни опити.
+    """
+    response = getattr(exc, "response", None)
+    status = getattr(response, "status_code", None)
+    if status in (401, 403):
+        raise AuthenticationError(detail=str(exc)) from exc

@@ -41,3 +41,6 @@ markers = [
 # подразбиране (не бавят обикновен `pytest`, не изискват .env/мрежа в CI); `pytest -m live`
 # ги пуска изрично.
 addopts = "-m 'not live'"
+
+[tool.setuptools.package-data]
+"src.web" = ["static/*"]

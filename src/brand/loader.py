@@ -36,7 +36,7 @@ from typing import Any
 
 import yaml
 
-from src.brand.format_rules import FormatRules, parse_format_rules
+from src.brand.format_rules import FormatRules, align_with_examples, parse_format_rules
 
 DEFAULT_KNOWLEDGE_DIR = Path("knowledge")
 
@@ -249,10 +249,15 @@ def load_brand_knowledge(knowledge_dir: Path = DEFAULT_KNOWLEDGE_DIR) -> BrandKn
         good_examples=good_examples,
         bad_examples=bad_examples,
         audit=audit,
-        format_rules=parse_format_rules(
-            _read_text(knowledge_dir / "voice/tone.md"),
-            _read_text(knowledge_dir / "voice/formats.md"),
-            facts,
+        # Г1 (research-plan-36): правилата се разширяват до дословните постове — виж
+        # format_rules.align_with_examples защо.
+        format_rules=align_with_examples(
+            parse_format_rules(
+                _read_text(knowledge_dir / "voice/tone.md"),
+                _read_text(knowledge_dir / "voice/formats.md"),
+                facts,
+            ),
+            good_examples,
         ),
         summary_examples=summary_examples,
     )
@@ -301,4 +306,20 @@ def audit_knowledge(knowledge_dir: Path = DEFAULT_KNOWLEDGE_DIR) -> dict[str, An
         # са и еталон — не влизат в промпта (виж докстринга на модула, правило 2).
         "summary_examples_count": len(knowledge.summary_examples),
         "bad_examples_count": len(knowledge.bad_examples),
+        # research-plan-36, Г4: промптът беше нараснал от 6.3k (след почистването в план 11)
+        # до ~15k знака, главно от бележки за разработчици с дати в tone.md/forbidden.md.
+        "stable_context_chars": len(knowledge.stable_context),
+        "dated_notes_in_prompt": dated_notes_in_prompt(knowledge.stable_context),
     }
+
+
+# Курсивна бележка от рода на „*Добавено 2026-08-27 по живо тестване…" — история за
+# разработчика, която трябва да е в HTML коментар, не в текста, който моделът чете.
+_DATED_NOTE_RE = re.compile(
+    r"^\s*\*?(?:Добавено|Допълнено|Коригирано|Разширено|Уточнение)[^\n]*20\d\d-\d\d-\d\d", re.MULTILINE
+)
+
+
+def dated_notes_in_prompt(stable_context: str) -> list[str]:
+    """Редове с датирани бележки за разработчици, които стигат до промпта (виж check-knowledge)."""
+    return [match.group(0).strip()[:90] for match in _DATED_NOTE_RE.finditer(stable_context)]

@@ -31,7 +31,7 @@ from typing import Any
 from src.brand.loader import load_brand_knowledge
 from src.llm.schema import CritiqueSchema, FactSource
 from src.pipeline import consolidator, critic
-from src.quality.metrics import ReferenceBand, TextMetrics, measure, reference_band
+from src.quality.metrics import ReferenceBand, TextMetrics, edit_ratio, measure, reference_band
 
 # Находка на Критика, която говори за механично правило. Такива НЕ бива да съществуват:
 # броенето на емоджи, хаштагове, думи и адреси е в кода от план 10, а промптът на Критика
@@ -65,6 +65,10 @@ class PostAnalysis:
     findings_factual: int
     findings_rules: int
     synthesis_happened: bool | None  # None, когато втори пост няма
+    # research-plan-36, Г6/Г7: колко е редактирал човекът (output/published.md) и колко е
+    # продължило пускането (meta.json → pipeline_seconds). None — няма данни.
+    edit_ratio: float | None = None
+    pipeline_seconds: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -79,6 +83,8 @@ class PostAnalysis:
                 "rules": self.findings_rules,
             },
             "synthesis_happened": self.synthesis_happened,
+            "edit_ratio": self.edit_ratio,
+            "pipeline_seconds": self.pipeline_seconds,
         }
 
 
@@ -126,6 +132,8 @@ class BenchReport:
             and p.stages["official"].facts < p.stages["post_i"].facts
         ]
         with_second = [p for p in self.posts if p.synthesis_happened is not None]
+        edits = [p.edit_ratio for p in self.posts if p.edit_ratio is not None]
+        seconds = [p.pipeline_seconds for p in self.posts if p.pipeline_seconds is not None]
 
         return {
             "runs": len(self.posts),
@@ -139,6 +147,10 @@ class BenchReport:
             "opens_with_fact": sum(
                 1 for p in self.posts if "official" in p.stages and p.stages["official"].opens_with_fact
             ),
+            "published_count": len(edits),
+            "published_unchanged": sum(1 for ratio in edits if ratio == 0),
+            "edit_ratio_median": round(statistics.median(edits), 3) if edits else None,
+            "pipeline_seconds_median": round(statistics.median(seconds), 1) if seconds else None,
         }
 
 
@@ -168,37 +180,46 @@ def _read(path: Path) -> str | None:
 
 
 def analyze_post_dir(post_dir: Path) -> PostAnalysis | None:
-    """Мери едно пускане. Връща None, ако папката не съдържа поне първа чернова."""
+    """
+    Мери едно пускане. Връща None, ако папката не съдържа нито първа чернова, нито предложение.
+
+    v5 пускания нямат post_i.md (кандидати + Съдия) — досега бенчът ги пропускаше изцяло и
+    v5 не можеше да бъде премерена (research-plan-36, Г7). Сега се мери поне предложението.
+    """
     post_i = _read(post_dir / "post_i.md")
-    if post_i is None:
-        return None  # пускане, което не е стигнало дори до Post I — няма какво да се мери
+    official = _read(post_dir / "output" / "post.md")
+    if post_i is None and official is None:
+        return None  # пускане, което не е стигнало до никакъв текст — няма какво да се мери
 
     post_ii = _read(post_dir / "post_ii.md")
-    official = _read(post_dir / "output" / "post.md")
 
     # Измерва отделно всяка налична стъпка — липсваща стъпка (напр. няма Post II, защото
     # Критикът не намери находки) просто отсъства от `stages`, не е грешка.
-    stages: dict[str, TextMetrics] = {"post_i": measure(post_i)}
+    stages: dict[str, TextMetrics] = {"post_i": measure(post_i)} if post_i else {}
     if post_ii:
         stages["post_ii"] = measure(post_ii)
     if official:
         stages["official"] = measure(official)
 
     meta_path = post_dir / "output" / "meta.json"
-    status, merged_from = "?", []
+    status, merged_from, pipeline_seconds = "?", [], None
     if meta_path.exists():
         try:
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
             status = meta.get("status", "?")
             merged_from = meta.get("merged_from", [])
+            pipeline_seconds = meta.get("pipeline_seconds")
         except json.JSONDecodeError:
             status = "невалиден meta.json"
+
+    published = _read(post_dir / "output" / "published.md")
+    ratio = edit_ratio(official, published) if (official and published) else None
 
     # Същата функция, която конвейерът ползва, за да вдигне открит въпрос — нарочно, а не
     # собствено сравнение тук: две дефиниции на „синтезът се случи ли" биха давали различен
     # отговор за един и същи пост и отчетът би противоречил на meta.json.
     synthesis_happened: bool | None = None
-    if post_ii and official:
+    if post_i and post_ii and official:
         synthesis_happened = consolidator.synthesis_bypassed(official, post_i, post_ii) is None
 
     mechanical, tone, factual, rules = _classify_findings(critic.load_critique(post_dir / "critique.md"))
@@ -213,6 +234,8 @@ def analyze_post_dir(post_dir: Path) -> PostAnalysis | None:
         findings_factual=factual,
         findings_rules=rules,
         synthesis_happened=synthesis_happened,
+        edit_ratio=ratio,
+        pipeline_seconds=pipeline_seconds,
     )
 
 
@@ -311,6 +334,16 @@ def render(report: BenchReport, previous: dict[str, Any] | None = None) -> str:
     lines.append(
         f"  механични находки на Критика (целта е 0): {agg['mechanical_findings_total']}"
     )
+    if agg.get("pipeline_seconds_median") is not None:
+        lines.append(f"  време на пускане (медиана): {agg['pipeline_seconds_median']} сек.")
+    if agg.get("published_count"):
+        lines.append(
+            f"  публикувани (/publikuvano): {agg['published_count']} · без промени: "
+            f"{agg['published_unchanged']} · медиана редактиран текст: "
+            f"{round(agg['edit_ratio_median'] * 100)}%  ← главната мярка (research-plan-36, Г6)"
+        )
+    else:
+        lines.append("  публикувани: няма данни — след публикуване напишете /publikuvano в агента")
 
     if previous:
         lines.append("")

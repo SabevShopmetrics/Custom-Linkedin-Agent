@@ -84,7 +84,8 @@ def test_complete_raises_model_unavailable_with_human_message_when_fallback_also
     with pytest.raises(ModelUnavailableError) as exc_info:
         client.complete(Role.WRITER, "промпт")
 
-    assert "Open WebUI" in exc_info.value.human_message
+    assert "/check" in exc_info.value.human_message
+    assert "writer-model" in exc_info.value.detail
     assert client.call_log[0].success is False
 
 
@@ -163,7 +164,7 @@ def test_complete_with_schema_gives_up_after_max_corrective_retries(monkeypatch)
     with pytest.raises(InvalidResponseError) as exc_info:
         client.complete(Role.PLANNER, "анализирай брифа", schema=PlanSchema)
 
-    assert "planner" in exc_info.value.human_message
+    assert "planner" in exc_info.value.detail
 
 
 def test_check_connection_reports_per_model_status_without_raising(monkeypatch):
@@ -234,3 +235,41 @@ def test_per_call_temperature_overrides_the_configured_one(monkeypatch):
     client.complete(Role.WRITER, "бриф", temperature=1.1)
 
     assert captured["temperature"] == 1.1
+
+
+def test_read_timeout_goes_straight_to_fallback_instead_of_repeating_the_same_request(monkeypatch):
+    # На живо 2026-10-13: Критикът изтече 3 × 120 s на същия модел, преди резервният да
+    # отговори за 63 s. Изтекло време за отговор не е моментен срив — повторението не помага.
+    models = []
+
+    def fake_post(url, headers, json, timeout):
+        models.append(json["model"])
+        if json["model"] == "primary":
+            raise requests.ReadTimeout("read timed out")
+        return content_response("готово")
+
+    monkeypatch.setattr(client_module.requests, "post", fake_post)
+    client = LLMClient(
+        make_config(model_planner="primary", model_fallback="fallback", model_max_retries=3), sleep_fn=lambda s: None
+    )
+
+    assert client.complete(Role.PLANNER, "x") == "готово"
+    assert models == ["primary", "fallback"]
+
+
+def test_connection_errors_are_still_retried_on_the_same_model(monkeypatch):
+    models = []
+
+    def fake_post(url, headers, json, timeout):
+        models.append(json["model"])
+        if len(models) < 3:
+            raise requests.ConnectionError("reset")
+        return content_response("готово")
+
+    monkeypatch.setattr(client_module.requests, "post", fake_post)
+    client = LLMClient(
+        make_config(model_planner="primary", model_fallback="fallback", model_max_retries=3), sleep_fn=lambda s: None
+    )
+
+    assert client.complete(Role.PLANNER, "x") == "готово"
+    assert models == ["primary", "primary", "primary"]

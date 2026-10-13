@@ -84,3 +84,20 @@ def test_encode_image_uses_webp_mime_for_webp_files(tmp_path):
     data_uri = client._encode_image(photo)
 
     assert data_uri.startswith("data:image/webp;base64,")
+
+
+def test_each_image_is_labelled_with_its_filename(tmp_path):
+    # Реално пускане 2026-10-13: без етикети моделът свързваше имената по реда им и описа
+    # скрийншот от терминал като „3D план на залата" — и той влезе в поста.
+    from src.llm.roles import Role
+
+    paths = []
+    for name in ("plan.png", "terminal.png"):
+        path = tmp_path / name
+        Image.new("RGB", (8, 8)).save(path)
+        paths.append(path)
+    client = LLMClient(make_config(max_image_bytes=10 * 1024 * 1024))
+    content = client._build_messages(Role.MEDIA, "избери", system=None, images=paths)[-1]["content"]
+    kinds = [part["type"] for part in content]
+    assert kinds == ["text", "text", "image_url", "text", "image_url"]
+    assert "plan.png" in content[1]["text"] and "terminal.png" in content[3]["text"]

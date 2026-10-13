@@ -28,17 +28,22 @@ def test_briefing_not_filled_error_tells_user_to_edit_it():
 
 
 def test_model_unavailable_error_says_what_to_check():
+    """research-plan-36, В7: текстът за човека е без ID на модел и роля на английски —
+    те остават в `detail` (run.log), където ги търси колегата, който поддържа агента."""
     err = ModelUnavailableError("writer", "Qwen 3.5 Large", 4, detail="timeout")
-    assert "Qwen 3.5 Large" in err.human_message
+    assert "Qwen 3.5 Large" not in err.human_message
+    assert "writer" not in err.human_message
     assert "4 опита" in err.human_message
-    assert "Open WebUI" in err.human_message
-    assert err.detail == "timeout"
+    assert "/check" in err.human_message
+    assert "Qwen 3.5 Large" in err.detail and "writer" in err.detail and "timeout" in err.detail
 
 
-def test_invalid_response_error_mentions_model_and_role():
+def test_invalid_response_error_keeps_model_and_role_in_detail_only():
     err = InvalidResponseError("planner", "velocity/Qwen3.6-35B-A3B", 3)
-    assert "planner" in err.human_message
-    assert "velocity/Qwen3.6-35B-A3B" in err.human_message
+    assert "planner" not in err.human_message
+    assert "JSON" not in err.human_message
+    assert "planner" in err.detail
+    assert "velocity/Qwen3.6-35B-A3B" in err.detail
 
 
 def test_image_too_large_error_reports_sizes_in_kb():

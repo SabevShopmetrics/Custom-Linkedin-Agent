@@ -91,10 +91,12 @@ def test_real_corpus_parses_into_enforceable_rules():
     facts = yaml.safe_load((KNOWLEDGE_DIR / "identity/facts.yaml").read_text(encoding="utf-8"))
     rules = load_format_rules(KNOWLEDGE_DIR, facts)
 
-    assert "✨" not in rules.allowed_emoji  # символът, който моделът си измисли
-    assert {"🙏", "🤝", "📖", "🔗", "✅", "🔹", "👏"} <= rules.allowed_emoji
+    # Г1 (research-plan-36): ✨ 🎤 💡 са в реален дословен пост (04) и вече са в tone.md;
+    # „0–7" идва от броя емоджи в дословните постове (0, 2, 2, 6, 7).
+    assert {"🙏", "🤝", "📖", "🔗", "✅", "🔹", "👏", "🎤", "💡", "✨"} <= rules.allowed_emoji
     assert rules.hashtags_forbidden is True
-    assert rules.emoji_max == 6
+    assert (rules.emoji_min, rules.emoji_max) == (0, 7)
+    assert rules.words_min == 100
     assert "ictclustervarna.com" in rules.known_hosts()
     assert rules.unparsed == ()
 

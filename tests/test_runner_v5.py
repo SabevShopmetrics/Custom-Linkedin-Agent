@@ -111,7 +111,7 @@ def test_v5_chain_produces_a_proposal_from_the_pairwise_winner(tmp_path):
     assert (post_dir / "judgement.json").exists()
     assert result.meta_path.exists()
 
-    time.sleep(0.3)  # изчаква фоновата [7] проверка, за да не тече неконтролируемо след теста
+    # Фоновата [7] проверка се изчаква от tests/conftest.py след всеки тест.
 
 
 def test_v5_chain_flags_unverified_claims_from_the_chosen_candidate(tmp_path):
@@ -129,7 +129,6 @@ def test_v5_chain_flags_unverified_claims_from_the_chosen_candidate(tmp_path):
     assert result.status == "ready_with_notes"
     assert any("Software" in note or "University" in note for note in result.open_notes)
 
-    time.sleep(0.3)
 
 
 def test_v5_chain_flags_gdpr_mention_in_the_chosen_candidate(tmp_path):
@@ -148,7 +147,6 @@ def test_v5_chain_flags_gdpr_mention_in_the_chosen_candidate(tmp_path):
     assert result.status == "ready_with_notes"
     assert any("GDPR" in note for note in result.open_notes)
 
-    time.sleep(0.3)
 
 
 def test_v5_chain_async_final_check_appends_to_meta_json_without_blocking(tmp_path):
@@ -167,12 +165,14 @@ def test_v5_chain_async_final_check_appends_to_meta_json_without_blocking(tmp_pa
     elapsed = time.monotonic() - started
 
     # Резултатът се връща веднага — стъпка [7] не е синхронна тук (виж план 15, Част 4).
-    assert elapsed < 2.0
+    # Голяма резерва нарочно: реалната стъпка [7] е 70–350s, а с фалшив клиент — милисекунди;
+    # 10s различава двете, без да пада на натоварен компютър (стабилност, 2026-10-12).
+    assert elapsed < 10.0
     assert "звучи административно" not in result.open_notes  # още не е стигнала до тук
 
     import json
 
-    for _ in range(50):
+    for _ in range(200):  # до 20s, излиза веднага щом е готово
         meta = json.loads(result.meta_path.read_text(encoding="utf-8"))
         if any("звучи административно" in note for note in meta.get("open_notes", [])):
             break
@@ -205,7 +205,7 @@ def test_v5_chain_on_final_check_receives_the_late_notes(tmp_path):
 
     run_pipeline(post_dir, client, knowledge=make_brand_knowledge(), on_final_check=updates.append)
 
-    for _ in range(50):
+    for _ in range(200):  # до 20s, излиза веднага щом е готово
         if updates:
             break
         time.sleep(0.1)
@@ -238,7 +238,6 @@ def test_v5_chain_excludes_a_forbidden_candidate_before_judge_selects(tmp_path):
     assert result.merged_from == ["post_2.md"]
     assert (post_dir / "output" / "post.md").read_text(encoding="utf-8").strip() == "Чист текст без спорни сравнения."
 
-    time.sleep(0.3)
 
 
 def test_default_chain_is_still_v3_when_config_omits_pipeline_chain(tmp_path):
