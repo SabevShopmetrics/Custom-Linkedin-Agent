@@ -168,6 +168,14 @@ def cmd_generate(args: argparse.Namespace) -> int:
         if final_updates:
             update = final_updates[0]
             late = humanize_notes(update.notes)
+            if update.autofixed:
+                # Стъпка [8] (research-plan-38): текстът по-горе вече е сменен — показваме новия.
+                print(f"\n✓ Агентът махна сам {len(update.autofixed)} недоказани неща:")
+                for claim in update.autofixed:
+                    print(f"  - {claim}")
+                fixed_text = (result.post_path.read_text(encoding="utf-8") if result.post_path.exists() else "").strip()
+                print("\nПоправеният пост:\n")
+                print(fixed_text)
             if update.status == "failed":
                 print("  Окончателната проверка не успя — прочетете поста внимателно.")
             elif late:

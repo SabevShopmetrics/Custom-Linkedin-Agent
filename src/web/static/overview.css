@@ -1,0 +1,190 @@
+/*
+ * „Преглед" (overview.js) — подредено наново в web-ui-5.
+ *
+ * Една скала за всичко: отстъпи 4 · 8 · 12 · 16 · 24 · 32; текст 12 · 13 · 14 · 16 · 20 · 30.
+ * Една ширина: всеки блок е в колоната на страницата (до 1240 px), без собствени полета.
+ * Основният текст никъде не е под 13 px.
+ */
+
+.ov { display: flex; flex-direction: column; gap: 16px; }
+.ov > * { width: 100%; max-width: 1240px; margin-left: auto !important; margin-right: auto !important; }
+
+/* ------------------------------------------------------------------ заглавие */
+.ov-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px 24px; flex-wrap: wrap; padding-bottom: 8px; }
+.ov-head-text { min-width: 0; }
+.ov-head h1 { font-family: var(--serif); font-size: 30px; line-height: 1.15; letter-spacing: -.01em; }
+.ov-head h1.warn { color: var(--warn); }
+.ov-sub { margin: 8px 0 0; color: var(--muted); font-size: 14px; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; }
+.ov-sub > svg { width: 16px; height: 16px; color: var(--faint); }
+.ov-sub b { color: var(--text); }
+.ov-watch {
+  display: inline-flex; align-items: center; gap: 6px; margin-left: 8px; padding: 2px 10px; border-radius: 999px;
+  background: var(--accent-soft); color: var(--accent); font-size: 12.5px; font-weight: 600; text-decoration: none;
+}
+.ov-watch svg { width: 14px; height: 14px; }
+.ov-head-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+
+/* ------------------------------------------------------------------ агентите и денят */
+.ov-status {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 16px; align-items: stretch;
+  background: var(--surface); border-radius: var(--radius); box-shadow: var(--shadow); padding: 12px 16px;
+}
+.ov-status-agents { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.ov-status-title { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.ov-status-title b { font-size: 14px; }
+.ov-team-toggle { font-size: 12.5px; color: var(--muted); }
+.ov-team-toggle svg { width: 15px; height: 15px; }
+.ov-team-toggle.on, .ov-team-toggle:hover { color: var(--accent); }
+.ov-slots { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 8px; }
+.ov-agent {
+  display: flex; flex-direction: column; gap: 2px; min-width: 0; text-align: left; font-size: 13px;
+  border: 1px dashed var(--line-strong); border-radius: 10px; padding: 8px 12px; background: transparent; color: var(--faint);
+}
+.ov-agent.busy { border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent); background: var(--accent-soft); color: var(--text); cursor: pointer; }
+.ov-agent.busy:hover { border-color: var(--accent); }
+.ov-agent-top { display: flex; justify-content: space-between; gap: 8px; }
+.ov-agent-top small { font-size: 12px; font-weight: 700; color: var(--faint); }
+.ov-agent.busy .ov-agent-top small:first-child { color: var(--accent); }
+.ov-agent-time { font-variant-numeric: tabular-nums; }
+.ov-agent b { font-size: 13.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ov-agent-free { font-size: 13px; }
+.ov-agent-role { display: flex; align-items: center; gap: 6px; min-width: 0; color: var(--muted); font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ov-agent-role i {
+  font-style: normal; font-weight: 700; font-size: 11.5px; padding: 1px 7px; border-radius: 999px;
+  background: var(--accent); color: var(--on-accent); flex: none;
+}
+.ov-metrics { display: grid; grid-template-columns: repeat(4, minmax(88px, auto)); border-left: 1px solid var(--line); }
+.ov-metric { display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 2px; padding: 0 16px; text-align: center; }
+.ov-metric + .ov-metric { border-left: 1px solid var(--line); }
+.ov-metric b { font-family: var(--serif); font-size: 22px; line-height: 1.1; font-variant-numeric: tabular-nums; }
+.ov-metric small { color: var(--muted); font-size: 12px; white-space: nowrap; }
+.ov-metric.ok b { color: var(--ok); }
+.ov-metric.bad b { color: var(--err); }
+
+/* „Кой какво прави" — разгъва се под реда на агентите. */
+.ov-team { background: var(--surface); border-radius: var(--radius); box-shadow: var(--shadow); padding: 12px 16px 16px; }
+.ov-team > p { margin: 0 0 12px; color: var(--muted); font-size: 13px; }
+.ov-team ol { margin: 0; padding: 0; list-style: none; display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 8px; }
+.ov-team li { display: grid; grid-template-columns: 24px 1fr; gap: 10px; padding: 10px 12px; border-radius: 10px; background: var(--surface-2); }
+.ov-team-n { width: 24px; height: 24px; border-radius: 50%; display: grid; place-items: center; background: var(--accent-soft); color: var(--accent); font-weight: 700; font-size: 12px; }
+.ov-team li div { display: grid; grid-template-columns: 1fr auto; gap: 2px 8px; font-size: 13px; }
+.ov-team li small { color: var(--faint); white-space: nowrap; }
+.ov-team li span { grid-column: 1 / -1; color: var(--muted); }
+
+/* ------------------------------------------------------------------ качвания в ход, папка */
+.ov-uploads { display: flex; flex-direction: column; gap: 8px; }
+.ov-upload {
+  display: grid; grid-template-columns: auto minmax(0, 1fr) minmax(120px, 280px) auto; gap: 16px; align-items: center;
+  text-decoration: none; color: inherit; background: var(--surface); border-radius: var(--radius); box-shadow: var(--shadow);
+  padding: 12px 16px; border-left: 4px solid var(--accent);
+}
+.ov-upload:hover { box-shadow: 0 0 0 1.5px var(--accent); }
+.ov-upload > svg { color: var(--accent); width: 20px; height: 20px; }
+.ov-upload-text { display: flex; flex-direction: column; min-width: 0; font-size: 14px; }
+.ov-upload-text small { color: var(--muted); font-size: 13px; }
+.ov-upload-bar { height: 6px; border-radius: 6px; background: var(--surface-2); overflow: hidden; }
+.ov-upload-bar i { display: block; height: 100%; background: var(--accent); }
+.ov-upload-go { color: var(--accent); display: inline-flex; align-items: center; gap: 2px; font-size: 13.5px; white-space: nowrap; }
+.ov-upload-go svg { width: 15px; height: 15px; }
+
+.ov-wait {
+  display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 12px; align-items: center;
+  background: var(--accent-soft); border-radius: var(--radius); padding: 12px 16px; font-size: 14px;
+}
+.ov-wait > svg { color: var(--accent); width: 20px; height: 20px; }
+.ov-wait div { display: flex; flex-direction: column; min-width: 0; }
+.ov-wait small { color: var(--muted); font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* ------------------------------------------------------------------ пътят: стъпки */
+.ov-path { display: flex; flex-direction: column; gap: 0; }
+.ov-steps { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 0; position: relative; z-index: 1; }
+.ov-step {
+  position: relative; display: grid; grid-template-columns: auto 1fr; grid-template-rows: auto auto; gap: 0 10px; align-items: center;
+  text-align: left; border: 0; cursor: pointer; color: var(--text); background: var(--surface-2);
+  padding: 12px 16px 12px 24px; min-width: 0; margin-right: 4px;
+  clip-path: polygon(0 0, calc(100% - 14px) 0, 100% 50%, calc(100% - 14px) 100%, 0 100%, 14px 50%);
+  transition: background .12s;
+}
+.ov-step:first-child { padding-left: 16px; border-radius: var(--radius) 0 0 0; clip-path: polygon(0 0, calc(100% - 14px) 0, 100% 50%, calc(100% - 14px) 100%, 0 100%); }
+.ov-step:last-child { margin-right: 0; border-radius: 0 var(--radius) 0 0; clip-path: polygon(0 0, 100% 0, 100% 100%, 0 100%, 14px 50%); }
+.ov-step:hover { background: var(--hover); }
+.ov-step b { grid-row: span 2; font-family: var(--serif); font-size: 26px; line-height: 1; font-variant-numeric: tabular-nums; min-width: 24px; }
+.ov-step span { font-weight: 700; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ov-step small { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ov-step.empty b, .ov-step.empty span { color: var(--faint); }
+.ov-step.current { background: var(--surface); }
+.ov-step.current span { color: var(--accent); }
+.ov-step.step-review:not(.empty) b { color: var(--warn); }
+.ov-step.step-ready:not(.empty) b { color: var(--ok); }
+.ov-step.step-writing:not(.empty) b { color: var(--accent); }
+
+/* ------------------------------------------------------------------ пътят: списъкът на стъпката */
+.ov-list-wrap { background: var(--surface); border-radius: 0 0 var(--radius) var(--radius); box-shadow: var(--shadow); padding: 8px 16px 12px; }
+.ov-list-head { display: flex; align-items: center; gap: 12px; padding: 8px 0 12px; border-bottom: 1px solid var(--line); }
+.ov-list-head h2 { font-family: var(--serif); font-size: 18px; display: flex; align-items: center; gap: 8px; }
+.ov-count { background: var(--surface-2); border-radius: 999px; font-family: var(--font); font-size: 12px; font-weight: 700; padding: 1px 9px; font-variant-numeric: tabular-nums; color: var(--muted); }
+.ov-list { list-style: none; margin: 0; padding: 0; }
+.ov-row { display: flex; align-items: center; gap: 12px; border-bottom: 1px solid var(--line); }
+.ov-row:last-child { border-bottom: 0; }
+.ov-row.lvl-error { box-shadow: inset 3px 0 0 var(--err); }
+.ov-row.lvl-warn { box-shadow: inset 3px 0 0 var(--warn); }
+.ov-row.approved:not(.lvl-error):not(.lvl-warn) { box-shadow: inset 3px 0 0 var(--st-approved); }
+.ov-row-main {
+  flex: 1; min-width: 0; display: grid; grid-template-columns: 48px 104px minmax(0, 1fr); gap: 16px; align-items: center;
+  border: 0; background: transparent; color: inherit; text-align: left; padding: 12px 8px; cursor: pointer; border-radius: 10px;
+}
+.ov-row-main:hover { background: var(--hover); }
+.ov-cover { width: 48px; height: 48px; border-radius: 9px; object-fit: cover; background: var(--surface-2); display: grid; place-items: center; color: var(--faint); }
+.ov-cover svg { width: 18px; height: 18px; }
+.ov-row-when { display: flex; flex-direction: column; gap: 2px; font-size: 13px; }
+.ov-row-when b { font-weight: 600; white-space: nowrap; }
+.ov-row-when small { color: var(--faint); font-size: 12.5px; font-variant-numeric: tabular-nums; }
+.ov-row-text { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.ov-row-text > b { font-size: 14.5px; line-height: 1.3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ov-row-note { font-size: 13px; line-height: 1.4; color: var(--muted); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.ov-row-note.lvl-error { color: var(--err); }
+.ov-row-note.lvl-warn { color: var(--warn); }
+.ov-row-progress { display: flex; align-items: center; gap: 10px; }
+.ov-row-progress small { color: var(--accent); font-size: 12.5px; font-weight: 600; white-space: nowrap; }
+.ov-bar { flex: 0 1 220px; height: 5px; border-radius: 5px; background: var(--accent-soft); overflow: hidden; }
+.ov-bar i { display: block; height: 100%; background: var(--accent); transition: width .6s ease; }
+.ov-row-side { display: flex; align-items: center; gap: 8px; flex: none; padding-right: 4px; }
+.ov-badge { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; font-weight: 600; color: var(--muted); background: var(--surface-2); border-radius: 999px; padding: 2px 9px; white-space: nowrap; }
+.ov-badge svg { width: 13px; height: 13px; }
+.ov-badge.ok { color: var(--ok); background: var(--ok-soft); }
+.ov-empty { margin: 0; padding: 24px 8px; color: var(--faint); font-size: 14px; text-align: center; }
+
+/* ------------------------------------------------------------------ по-тесни екрани */
+/* Ширината на колоната е екранът минус лявата колона (284 px) — праговете са по екрана. */
+@media (max-width: 1480px) {
+  .ov-status { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+  .ov-metrics { border-left: 0; border-top: 1px solid var(--line); padding-top: 12px; grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .ov-metric { padding: 0 8px; flex-direction: row; gap: 8px; }
+  .ov-metric b { font-size: 18px; }
+  .ov-slots { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+}
+@media (max-width: 1360px) {
+  .ov-step { grid-template-rows: auto; }
+  .ov-step b { grid-row: auto; }
+  .ov-step small { display: none; }
+}
+@media (max-width: 760px) {
+  .ov-head h1 { font-size: 24px; }
+  .ov-steps { grid-template-columns: repeat(5, minmax(96px, 1fr)); overflow-x: auto; }
+  .ov-step { padding: 10px 8px 10px 20px; }
+  .ov-step b { font-size: 20px; }
+  .ov-row { flex-wrap: wrap; }
+  .ov-row-main { grid-template-columns: 40px minmax(0, 1fr); gap: 10px; }
+  .ov-row-when { grid-column: 2; flex-direction: row; gap: 6px; order: 2; }
+  .ov-row-text { grid-column: 2; }
+  .ov-cover { width: 40px; height: 40px; grid-row: span 2; }
+  .ov-row-side { width: 100%; justify-content: flex-end; padding: 0 8px 10px; }
+  .ov-upload { grid-template-columns: auto minmax(0, 1fr) auto; }
+  .ov-upload-bar { grid-column: 1 / -1; }
+}
+
+/* ------------------------------------------------------------------ календар: четими постове в клетката (web-ui-5) */
+/* Часът е отделен ред, заглавието се побира на два реда — вместо „10:00 Но…". */
+.cal-chip:not(.wide) { display: grid; grid-template-columns: auto 1fr; gap: 0 4px; align-items: start; line-height: 1.25; }
+.cal-chip:not(.wide) time { grid-column: 1 / -1; font-size: 11px; }
+.cal-chip:not(.wide) span { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; font-size: 12px; font-weight: 600; }

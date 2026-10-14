@@ -29,10 +29,12 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import hmac
 import ipaddress
 import json
 import os
+import socket
 import re
 import shutil
 import subprocess
@@ -43,7 +45,7 @@ import traceback
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -56,7 +58,7 @@ from src.pipeline.util import read_json, read_text_or_none, write_json
 from src.quality.metrics import edit_ratio
 from src.repl import slugify, unique_post_dir
 from src.publish import linkedin as publisher
-from src.web import batches, schedule, uploads
+from src.web import alerts, assistant, batches, flow, insights, library, schedule, uploads
 from src.web.worker import GENERATE_STEPS
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -72,6 +74,15 @@ TRASH_DIR = "_kosh"  # „изтрити" постове — преместен�
 _POST_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,150}$")
 _CLIENT_HEADER = "X-Requested-With"
 _CLIENT_HEADER_VALUE = "linkedin-agent"
+SCHEDULER_SECONDS = 30  # колко често се проверява дали насрочен пост е на ред
+LATE_LIMIT_HOURS = 6  # закъснял повече (сървърът е бил спрян) → само напомняне, не публикуване
+CONFIG_ALERT_HOURS = 24  # одобрен пост излиза до толкова часа, а настройките за LinkedIn липсват → сигнал
+TOKEN_ALERT_DAYS = 7  # LINKEDIN_TOKEN_EXPIRES е след толкова дни → сигнал
+PUBLISH_ALERT_KINDS = ("publish_failed", "publish_missed", "publish_config", "due_reminder")
+REVIEW_ALERT_KINDS = ("writing_failed", "needs_review")
+INGEST_SECONDS = 60  # колко често се гледа папката за нови пост-папки
+ACTIVE_DAYS = 3  # „Преглед" показва насрочените, текущите и пипнатите в последните толкова дни
+_TIME_RE = re.compile(r"^([01]?\d|2[0-3])[:.]([0-5]\d)$")
 
 
 class HttpError(Exception):
@@ -122,6 +133,11 @@ class Job:
         }
 
 
+# Версия на API-то, което страниците очакват (static/store.js → UI_VERSION). Различна → страницата
+# казва „нужен е рестарт" (страниците се четат наново от диска, сървърът — само при рестарт).
+# Вдига се при всяка промяна на адрес или полета, на които разчита интерфейсът.
+UI_VERSION = "2026-10-14.6"
+
 # --------------------------------------------------------------------------- приложение
 
 
@@ -139,6 +155,7 @@ class WebApp:
         max_jobs: int = DEFAULT_MAX_JOBS,
         publish_settings: publisher.PublishSettings | None = None,
         publish_session: Any = None,
+        alert_sender: alerts.Sender | None = None,
     ) -> None:
         """
         `in_process` + `client_factory` — само за тестове: задачата тече в нишка с подменен
@@ -160,6 +177,10 @@ class WebApp:
         self._pump_lock = threading.RLock()  # _pump → generate → _finish → _pump
         self._publish_settings = publish_settings
         self._publish_session = publish_session
+        self._stop = threading.Event()
+        # Изпращач на сигнали навън (Teams/Slack/имейл). None — само в интерфейса. serve() го
+        # взима от .env; тестовете подават подменен — никога мрежа от тестове.
+        self.alert_sender = alert_sender
 
     # ---------------------------------------------------------------- конфигурация
 
@@ -227,15 +248,18 @@ class WebApp:
                 web_json.stat().st_mtime if web_json.exists() else 0,  # нов ред в чата
             )
             meta = _read_meta(path)
+            web = _read_web(path)
             items.append({
                 "id": path.name,
-                "title": _read_web(path).get("title")
+                "title": web.get("title")
                 or _brief_title(read_text_or_none(path / "briefing.md") or "")
                 or "(без бриф)",
                 "status": meta.get("status") if post_md.exists() else None,
                 "published": (path / "output" / "published.md").exists(),
                 "modified": stamp,
-                "batch": _read_web(path).get("batch"),
+                "batch": web.get("batch"),
+                "mode": web.get("mode") or modes.DEFAULT_MODE,
+                **self._schedule_info(path, web),
             })
         items.sort(key=lambda item: item["modified"], reverse=True)
         return items[:300]
@@ -293,6 +317,7 @@ class WebApp:
             "draft": job.draft if job and job.state == "running" else None,
             "last_run": _read_json_or_none(path / "web-run.json"),
             "job": job.to_dict() if job else None,
+            "schedule": self._schedule_info(path, web),
         }
 
     def save_text(self, post_id: str, text: str) -> None:
@@ -314,6 +339,7 @@ class WebApp:
             raise HttpError(409, "Още няма готов пост.")
         published = (text or "").strip() or (read_text_or_none(output / "edited.md") or "").strip() or proposed
         (output / "published.md").write_text(published + "\n", encoding="utf-8")
+        alerts.resolve_for_post(self.posts_dir, post_id, PUBLISH_ALERT_KINDS)
         ratio = edit_ratio(proposed, published)
         changed = "без промени" if ratio == 0 else f"около {round(ratio * 100)}% променен"
         self._append_message(path, {"role": "agent", "kind": "note", "text": f"Отбелязан като публикуван ({changed})."})
@@ -450,6 +476,10 @@ class WebApp:
             # края — отговорът на агента в историята трябва вече да е записан.
             job.finished = time.time()
             job.state = state
+        try:
+            self._review_alerts(job, state)
+        except Exception:  # noqa: BLE001 — сигналът е удобство, не бива да спре опашката
+            traceback.print_exc()
         self._pump()  # освободи се място — следващият пост от опашката тръгва
 
     def cancel(self, job: Job) -> None:
@@ -502,6 +532,7 @@ class WebApp:
 
     def close(self) -> None:
         """Спира работещите процеси при спиране на сървъра."""
+        self._stop.set()
         self.queue.clear()
         for job in list(self.jobs.values()):
             proc = job.proc
@@ -668,6 +699,7 @@ class WebApp:
         (path / "briefing.md").write_text(brief + "\n", encoding="utf-8")
         web = _read_web(path)
         web["mode"] = mode_key
+        web.pop("needs_brief", None)  # празно място от план → вече има бриф
         write_json(path / "web.json", web)
         self._append_message(path, {
             "role": "user", "text": (message or brief).strip(), "photos": self._take_pending(path), "mode": mode_key,
@@ -847,11 +879,35 @@ class WebApp:
             "id": batch["id"],
             "name": batch.get("name"),
             "source": batch.get("source"),
+            "kind": batch.get("kind"),
             "created": batch.get("created"),
             "items": items,
             "counts": counts,
             "max_jobs": self.max_jobs,
             "running_total": len(self.running_jobs()),
+            "summary": self._batch_summary(items),
+        }
+
+    def _batch_summary(self, items: list[dict[str, Any]]) -> dict[str, Any]:
+        """Обобщението на таблото (web-ui-5): време, колко остава, какво иска човек."""
+        done = [i for i in items if i["state"] == "done"]
+        seconds = [i["seconds"] for i in done if i.get("seconds")]
+        avg = round(sum(seconds) / len(seconds)) if seconds else None
+        left = sum(1 for i in items if i["state"] in ("running", "queued"))
+        eta = None
+        if avg and left:
+            # Агентите пишат по max_jobs наведнъж: остават ceil(left / max_jobs) „вълни" по средното време.
+            eta = round(-(-left // max(1, self.max_jobs)) * avg)
+        dates = sorted(i["date"] for i in items if i.get("date"))
+        return {
+            "avg_seconds": avg,
+            "eta_seconds": eta,
+            "attention": sum(1 for i in items if i.get("attention")),
+            "approved": sum(1 for i in items if i.get("approved")),
+            "published": sum(1 for i in items if i.get("published")),
+            "autofixed": sum(i.get("autofixed", 0) for i in items),
+            "first_date": dates[0] if dates else None,
+            "last_date": dates[-1] if dates else None,
         }
 
     def _batch_item(self, index: int, item: dict[str, Any], *, full: bool) -> dict[str, Any]:
@@ -896,6 +952,17 @@ class WebApp:
             "draft": (job.draft or "")[:320] if running and job.draft else None,
             "seconds": meta.get("pipeline_seconds") if text else None,
         }
+        # web-ui-5: часът, одобрението и най-важната бележка — таблото е подробният изглед на пакета.
+        sched = self._schedule_info(path, web) if exists else {}
+        result.update({
+            "time": sched.get("scheduled_time"),
+            "approved": bool(sched.get("approved")),
+            "digest": flow.note_digest(meta) if text and meta.get("status") != "ready" else "",
+            "autofixed": sum(1 for f in meta.get("applied_fixes", []) or [] if str(f).startswith("Махнато след проверката")) if text else 0,
+            "attention": bool(text) and (bool(meta.get("insufficient_brief")) or bool(meta.get("warnings"))
+                                         or bool(sched.get("time_warning")) or bool(sched.get("approval_stale")))
+                         or state in ("error", "cancelled"),
+        })
         if full:
             result["text"] = text
         return result
@@ -921,8 +988,14 @@ class WebApp:
         try:
             result = publisher.publish(path / "output", body, photos, settings, session=self._publish_session)
         except publisher.PublishError as exc:
+            self.alert("publish_failed", "error", exc.human_message, post_id=post_id)
             raise HttpError(502 if settings.mode == "linkedin" else 400, exc.human_message) from exc
+        except Exception as exc:  # мрежа/неочаквано — човекът трябва да разбере, че постът НЕ е излязъл
+            self.alert("publish_failed", "error", f"Неочаквана грешка при връзката с LinkedIn ({type(exc).__name__}).",
+                       post_id=post_id)
+            raise HttpError(502, "Връзката с LinkedIn прекъсна — постът не е публикуван. Опитайте пак.") from exc
         if result.mode == "linkedin":
+            alerts.resolve_for_post(self.posts_dir, post_id, PUBLISH_ALERT_KINDS)
             self.mark_published(post_id, body)
             self._append_message(path, {"role": "agent", "kind": "note", "text": f"Публикуван в LinkedIn: {result.url}"})
         else:
@@ -932,6 +1005,746 @@ class WebApp:
                         "output/linkedin-request.json — копирайте текста и го публикувайте ръчно.",
             })
         return result.to_dict()
+
+    # ---------------------------------------------------------------- насрочване (web-ui-3)
+    #
+    # Постът има дата и час (web.json: scheduled_for, scheduled_time). „Одобрен" значи, че
+    # човекът е видял ТОЧНО този текст и е съгласен да излезе в този час — пази се отпечатък
+    # на текста; всяка промяна по текста отменя одобрението сама. Когато часът дойде:
+    #   PUBLISH_MODE=linkedin → публикува се (само одобрен, само ако не е закъснял > 6 ч.);
+    #   PUBLISH_MODE=draft    → бележка „време е" в чата на поста — човекът публикува ръчно.
+
+    def _schedule_info(self, path: Path, web: dict[str, Any]) -> dict[str, Any]:
+        approved = web.get("approved") if isinstance(web.get("approved"), dict) else None
+        valid = False
+        text = batches.final_text(path) if (approved or web.get("scheduled_for")) else ""
+        if approved:
+            valid = bool(text) and approved.get("hash") == _text_hash(text)
+        time_warning = None
+        if text and web.get("scheduled_for"):
+            written = _written_on(path)
+            time_warning = insights.relative_time_warning(text, web.get("scheduled_for"), written)
+        return {
+            "scheduled_for": web.get("scheduled_for"),
+            "scheduled_time": web.get("scheduled_time"),
+            "approved": valid,
+            "approval_stale": bool(approved) and not valid,
+            "needs_brief": bool(web.get("needs_brief")),
+            "idea": web.get("idea") if web.get("needs_brief") else None,
+            "album": web.get("album"),
+            "due_notified": bool(web.get("due_notified")),
+            "time_warning": time_warning,
+        }
+
+    def set_schedule(self, post_id: str, *, when: Any = None, at: Any = None, approved: Any = None) -> dict[str, Any]:
+        path = self.post_dir(post_id)
+        web = _read_web(path)
+        if when is not None:
+            if str(when).strip() == "":
+                for key in ("scheduled_for", "scheduled_time", "approved", "due_notified"):
+                    web.pop(key, None)
+            else:
+                iso = schedule.parse_date(when)
+                if not iso:
+                    raise HttpError(400, "Не разбирам датата — напр. 2026-11-20 или 20.11.2026.")
+                web["scheduled_for"] = iso
+                web.pop("due_notified", None)
+        if at is not None:
+            match = _TIME_RE.match(str(at).strip())
+            if str(at).strip() and not match:
+                raise HttpError(400, "Часът трябва да е като 10:00.")
+            web["scheduled_time"] = f"{int(match.group(1)):02d}:{match.group(2)}" if match else None
+            web.pop("due_notified", None)
+        if approved is not None:
+            if approved:
+                text = batches.final_text(path)
+                if not text:
+                    raise HttpError(409, "Още няма текст за одобрение — първо агентът трябва да напише поста.")
+                if not web.get("scheduled_for"):
+                    raise HttpError(409, "Изберете дата, преди да одобрите поста за публикуване.")
+                web["approved"] = {"hash": _text_hash(text), "at": round(time.time())}
+                alerts.resolve_for_post(self.posts_dir, post_id, REVIEW_ALERT_KINDS)
+                self._append_message(path, {
+                    "role": "agent", "kind": "note",
+                    "text": f"Одобрен за {web['scheduled_for']} {web.get('scheduled_time') or assistant.DEFAULT_TIME}.",
+                })
+            else:
+                web.pop("approved", None)
+            web.pop("due_notified", None)
+        write_json(path / "web.json", web)
+        return self._schedule_info(path, web)
+
+    def scheduler_tick(self, now: datetime | None = None) -> list[str]:
+        """Една проверка: насрочените постове, чийто час е дошъл. Връща кои са обработени."""
+        now = now or datetime.now()
+        handled: list[str] = []
+        if not self.posts_dir.is_dir():
+            return handled
+        running = {job.post_id for job in self.running_jobs()}
+        for path in self.posts_dir.iterdir():
+            if not path.is_dir() or path.name.startswith(("_", ".")) or path.name in running:
+                continue
+            web = _read_web(path)
+            if not web.get("scheduled_for") or web.get("due_notified") or (path / "output" / "published.md").exists():
+                continue
+            info = self._schedule_info(path, web)
+            if not info["approved"]:
+                continue
+            try:
+                due = datetime.fromisoformat(f"{web['scheduled_for']}T{web.get('scheduled_time') or assistant.DEFAULT_TIME}")
+            except ValueError:
+                continue
+            if due > now:
+                continue
+            late = (now - due).total_seconds() > LATE_LIMIT_HOURS * 3600
+            web["due_notified"] = round(time.time())
+            write_json(path / "web.json", web)
+            stamp = f"{web['scheduled_for']} {web.get('scheduled_time') or assistant.DEFAULT_TIME}"
+            if self.publish_settings().mode == "linkedin" and not late:
+                try:
+                    self.publish(path.name, None)  # при грешка publish() сам вдига сигнал
+                except HttpError as exc:
+                    self._append_message(path, {"role": "agent", "kind": "note",
+                                                "text": f"⏰ Насроченото публикуване ({stamp}) не мина: {exc.message}"})
+            elif late:
+                self._append_message(path, {"role": "agent", "kind": "note",
+                                            "text": f"⏰ Часът ({stamp}) мина, докато агентът беше спрян — публикувайте ръчно."})
+                self.alert("publish_missed", "error",
+                           f"Трябваше да излезе на {stamp}, но агентът беше спрян. Постът НЕ е публикуван — "
+                           "публикувайте го ръчно или изберете нов час.", post_id=path.name)
+            else:
+                self._append_message(path, {"role": "agent", "kind": "note", "text": (
+                    f"⏰ Време е за публикуване ({stamp}). Режим „чернова“ — копирайте текста, публикувайте "
+                    "го в LinkedIn и натиснете „Публикувах го“.")})
+                self.alert("due_reminder", "action",
+                           f"Насрочен за {stamp}. Режим „чернова“ — копирайте текста и го публикувайте ръчно.",
+                           post_id=path.name)
+            handled.append(path.name)
+        self._check_publish_readiness(now)
+        return handled
+
+    def _check_publish_readiness(self, now: datetime) -> None:
+        """
+        Сигнали ПРЕДИ проблема: одобрен пост излиза до 24 ч., а LinkedIn настройките липсват;
+        токенът изтича до 7 дни (LINKEDIN_TOKEN_EXPIRES, 60 дни без refresh — web-ui-2).
+        """
+        settings = self.publish_settings()
+        if settings.mode != "linkedin":
+            return
+        problem = settings.problem()
+        for path in self.posts_dir.iterdir():
+            if not path.is_dir() or path.name.startswith(("_", ".")):
+                continue
+            web = _read_web(path)
+            key = f"publish_config:{path.name}"
+            if not web.get("scheduled_for") or (path / "output" / "published.md").exists():
+                continue
+            if not self._schedule_info(path, web)["approved"]:
+                continue
+            try:
+                due = datetime.fromisoformat(f"{web['scheduled_for']}T{web.get('scheduled_time') or assistant.DEFAULT_TIME}")
+            except ValueError:
+                continue
+            soon = timedelta(0) <= due - now <= timedelta(hours=CONFIG_ALERT_HOURS)
+            if problem and soon:
+                self.alert("publish_config", "warn",
+                           f"Излиза на {web['scheduled_for']} {web.get('scheduled_time') or ''}, но: {problem}",
+                           post_id=path.name)
+            elif not problem:
+                alerts.resolve_by_key(self.posts_dir, key)
+        expires = os.environ.get("LINKEDIN_TOKEN_EXPIRES", "").strip()
+        if expires:
+            try:
+                left = (date.fromisoformat(expires) - now.date()).days
+            except ValueError:
+                left = None
+            if left is not None and left <= TOKEN_ALERT_DAYS:
+                text = (f"Токенът за LinkedIn изтече на {expires}." if left < 0
+                        else f"Токенът за LinkedIn изтича на {expires} (след {left} дни).")
+                self.alert("token_expiring", "warn",
+                           f"{text} Без нов токен насрочените постове няма да излязат — подновява се от Super Admin "
+                           "на страницата (LINKEDIN_ACCESS_TOKEN и LINKEDIN_TOKEN_EXPIRES в .env).",
+                           key=f"token_expiring:{expires}")
+
+    # ---------------------------------------------------------------- папка → постове сами (web-ui-4)
+    #
+    # „Пуска папка и забравя": всяка НОВА подпапка със снимки и текст става пост — насрочен по
+    # „Кога:" или името на папката — и тръгва да се пише. Само папки, появили се СЛЕД включването
+    # (`ingest_since`): иначе избирането на стара папка би изписало наведнъж всичко в нея.
+
+    # ---------------------------------------------------------------- настройки и туториал (web-ui-5)
+    #
+    # Туториалът се показва сам само веднъж: минат или пропуснат → помни се в posts/_settings.json
+    # (на сървъра, не в браузъра — колежката може да отвори агента от друг браузър и пак да не я
+    # спамим). Пуска се пак от „Настройки".
+
+    def tutorial_state(self) -> dict[str, Any]:
+        raw = library.settings(self.posts_dir).get("tutorial")
+        if isinstance(raw, dict) and raw.get("state") in ("finished", "skipped"):
+            return {"done": True, "state": raw["state"], "at": raw.get("at"), "step": raw.get("step")}
+        return {"done": False, "state": None, "at": None, "step": None}
+
+    def set_tutorial(self, state: str, step: Any = None) -> dict[str, Any]:
+        if state == "reset":
+            library.save_settings(self.posts_dir, {"tutorial": None})
+        elif state in ("finished", "skipped"):
+            value: dict[str, Any] = {"state": state, "at": round(time.time())}
+            if isinstance(step, int) and step >= 0:
+                value["step"] = step
+            library.save_settings(self.posts_dir, {"tutorial": value})
+        else:
+            raise HttpError(400, "Непознато състояние на туториала.")
+        return self.tutorial_state()
+
+    def settings_view(self) -> dict[str, Any]:
+        """Всичко универсално на едно място — за страницата „Настройки"."""
+        publish = self.publish_settings()
+        config = None
+        try:
+            config = load_config()
+        except ConfigError:
+            pass
+        folder = self.library_folder()
+        return {
+            "tutorial": self.tutorial_state(),
+            "folder": str(folder) if folder else None,
+            "auto_ingest": self.ingest_settings()["auto"],
+            "publish_mode": publish.mode,
+            "publish_problem": publish.problem(),
+            "max_jobs": self.max_jobs,
+            "default_mode": modes.DEFAULT_MODE,
+            "alert_channels": alerts.channels_from_env() if self.alert_sender else {"webhook": False, "email": False},
+            "speed": {
+                "no_thinking": sorted(config.no_thinking_roles) if config else [],
+                "final_autofix": bool(config.final_autofix) if config else None,
+                "structured_output": config.structured_output if config else None,
+            },
+        }
+
+    def ingest_settings(self) -> dict[str, Any]:
+        values = library.settings(self.posts_dir)
+        return {"auto": bool(values.get("auto_ingest")), "since": values.get("ingest_since"),
+                "ingested": values.get("ingested") or {}}
+
+    def set_auto_ingest(self, on: bool) -> dict[str, Any]:
+        values: dict[str, Any] = {"auto_ingest": bool(on)}
+        if on and not library.settings(self.posts_dir).get("auto_ingest"):
+            values["ingest_since"] = round(time.time())
+        library.save_settings(self.posts_dir, values)
+        return self.ingest_settings()
+
+    def _post_folders(self) -> list[dict[str, Any]]:
+        folder = self.library_folder()
+        if folder is None:
+            return []
+        return [a for a in library.scan(folder)["albums"] if a.get("brief") and a["path"]]
+
+    def ingest_tick(self) -> list[str]:
+        cfg = self.ingest_settings()
+        if not cfg["auto"]:
+            return []
+        created = []
+        for album in self._post_folders():
+            record = cfg["ingested"].get(album["path"])
+            if record:
+                self._mark_source_change(record, album)
+                continue
+            if album["path"] in {p.get("album") for p in self.list_posts() if p.get("album")}:
+                continue  # вече е пост (през асистента) — не го дублираме
+            if album["modified"] < (cfg["since"] or 0):
+                continue  # стара папка — в „Входящи" за ръчно „Вземи"
+            created.append(self.ingest_album(album["path"]))
+        return created
+
+    def ingest_album(self, rel: str) -> str:
+        """Пост-папка → пост: бриф от текста, снимки, дата/час/режим от заглавните редове или името."""
+        album = next((a for a in self._post_folders() if a["path"] == rel), None)
+        if album is None:
+            raise HttpError(404, f"В папката няма пост-папка „{rel}“ (снимки + текстов файл).")
+        known = self.ingest_settings()["ingested"].get(rel)
+        if known and (self.posts_dir / known.get("post_id", "")).is_dir():
+            return known["post_id"]
+        meta, body = flow.parse_header(album["brief"])
+        if not body:
+            raise HttpError(400, f"Текстът в „{rel}“ е празен.")
+        when, at = flow.when_from(album["name"], meta)
+        mode = flow.mode_from(meta) or modes.DEFAULT_MODE
+        post_id = self.create_post(body, mode)
+        path = self.posts_dir / post_id
+        web = _read_web(path)
+        web.update({"auto_name": False, "title": flow.title_from(album["name"], meta), "source": "folder",
+                    "source_hash": album["brief_hash"]})
+        if when and when >= date.today().isoformat():
+            web.update({"scheduled_for": when, "scheduled_time": at or assistant.DEFAULT_TIME})
+        write_json(path / "web.json", web)
+        folder = self.library_folder()
+        if folder is not None:
+            self._copy_album(path, folder, rel)
+        values = library.settings(self.posts_dir)
+        ingested = values.get("ingested") or {}
+        ingested[rel] = {"post_id": post_id, "hash": album["brief_hash"], "t": round(time.time())}
+        library.save_settings(self.posts_dir, {"ingested": ingested})
+        with self._pump_lock:
+            if post_id not in self.queue:
+                self.queue.append(post_id)
+        self._pump()
+        return post_id
+
+    # ---------------------------------------------------------------- качена папка (web-ui-5)
+    #
+    # „Качи папка" / плъзната папка от компютъра: всяка подпапка (снимки + текст) става пост — без
+    # да се избира „Папка" на сървъра. Браузърът праща текста; сървърът го разчита със същите
+    # правила като пост-папките (flow.py): „Кога:", името на папката, „Режим:", „Заглавие:".
+    # Снимките идват после през обичайното качване; писането тръгва с inbox_start.
+
+    def inbox_batch(self, name: str) -> dict[str, Any]:
+        """Едно качване на папка = един пакет със свое табло (#/b/<id>) — web-ui-5."""
+        batch = batches.make_batch(name or "Качена папка", "папка от компютъра", [])
+        batch["kind"] = "upload"
+        batches.save_batch(self.posts_dir, batch)
+        return {"id": batch["id"], "name": batch["name"]}
+
+    def inbox_post(self, name: str, text: str, batch_id: str | None = None) -> dict[str, Any]:
+        name = " ".join(str(name or "").split())[:200] or "Нов пост"
+        meta, body = flow.parse_header(text or "")
+        when, at = flow.when_from(name, meta)
+        mode = flow.mode_from(meta) or modes.DEFAULT_MODE
+        title = flow.title_from(name, meta)
+        post_id = self.create_post(body, mode)
+        path = self.posts_dir / post_id
+        web = _read_web(path)
+        web.update({"auto_name": False, "title": title, "source": "upload"})
+        scheduled = bool(when and when >= date.today().isoformat())
+        if scheduled:
+            web.update({"scheduled_for": when, "scheduled_time": at or assistant.DEFAULT_TIME})
+        if not body:
+            web.update({"needs_brief": True, "idea": title})
+        batch = batches.load_batch(self.posts_dir, batch_id) if batch_id else None
+        if batch is not None:
+            web["batch"] = batch["id"]
+            with self._pump_lock:  # редовете идват един по един, но пакетът е общ файл
+                batch = batches.load_batch(self.posts_dir, batch["id"]) or batch
+                batch["items"].append({"post_id": post_id, "row": len(batch["items"]) + 1, "date": when if scheduled else None,
+                                       "title": title, "photos": None})
+                batches.save_batch(self.posts_dir, batch)
+        write_json(path / "web.json", web)
+        return {"id": post_id, "title": title, "when": when if scheduled else None,
+                "at": (at or assistant.DEFAULT_TIME) if scheduled else None,
+                "past": bool(when) and not scheduled, "mode": mode, "has_brief": bool(body)}
+
+    def inbox_start(self, post_id: str) -> dict[str, Any]:
+        path = self.post_dir(post_id)
+        if not (read_text_or_none(path / "briefing.md") or "").strip():
+            return {"queued": False}  # без текст — чака бриф във „Входящи"
+        with self._pump_lock:
+            if post_id not in self.queue and not self.job_for(post_id):
+                self.queue.append(post_id)
+        self._pump()
+        return {"queued": True}
+
+    def _mark_source_change(self, record: dict[str, Any], album: dict[str, Any]) -> None:
+        path = self.posts_dir / record.get("post_id", "")
+        if not path.is_dir() or record.get("hash") == album.get("brief_hash"):
+            return
+        web = _read_web(path)
+        if web.get("source_hash") != album.get("brief_hash") and not web.get("source_changed"):
+            web["source_changed"] = True
+            write_json(path / "web.json", web)
+
+    def rewrite_from_source(self, post_id: str) -> Job:
+        """„Пиши наново" след промяна на текста в папката — новият текст става брифът."""
+        path = self.post_dir(post_id)
+        rel = _read_web(path).get("album")
+        album = next((a for a in self._post_folders() if a["path"] == rel), None)
+        if album is None:
+            raise HttpError(409, "Не намирам папката на поста — пишете в чата му.")
+        meta, body = flow.parse_header(album["brief"])
+        web = _read_web(path)
+        web.update({"source_hash": album["brief_hash"], "source_changed": False})
+        write_json(path / "web.json", web)
+        values = library.settings(self.posts_dir)
+        ingested = values.get("ingested") or {}
+        if rel in ingested:
+            ingested[rel]["hash"] = album["brief_hash"]
+            library.save_settings(self.posts_dir, {"ingested": ingested})
+        return self.generate(post_id, body, flow.mode_from(meta), message="Текстът в папката е променен — пиша наново.")
+
+    # ---------------------------------------------------------------- „Преглед" — целият път с един поглед
+
+    def _post_view(self, item: dict[str, Any], running: dict[str, Job], queue: list[str]) -> dict[str, Any]:
+        path = self.posts_dir / item["id"]
+        web = _read_web(path)
+        meta = _read_meta(path)
+        has_text = bool(batches.final_text(path))
+        try:
+            media = read_json(path / "media.json").get("selected", [])
+        except (OSError, ValueError):
+            media = []
+        selected = set(uploads.selected_photos(path)) if has_text else set()
+        minors = sum(1 for m in media if m.get("possible_minor") and m.get("filename") in selected)
+        job = self.job_for(item["id"])
+        job_error = job.error if job and job.state == "error" else None
+        overdue = False
+        if has_text and item.get("approved") and item.get("scheduled_for") and not item["published"]:
+            try:
+                due = datetime.fromisoformat(f"{item['scheduled_for']}T{item.get('scheduled_time') or assistant.DEFAULT_TIME}")
+                overdue = due <= datetime.now()
+            except ValueError:
+                pass
+        problems = flow.issues(
+            has_text=has_text, meta=meta, sched=item, minors=minors, job_error=job_error,
+            source_changed=bool(web.get("source_changed")), published=item["published"],
+            overdue=overdue, publish_mode=self.publish_settings().mode,
+        )
+        run = running.get(item["id"])
+        cover = (uploads.selected_photos(path) or [e["name"] for e in uploads.list_photo_entries(path) if e["included"]] or [None])[0]
+        return {
+            **{k: item.get(k) for k in ("id", "title", "scheduled_for", "scheduled_time", "approved", "needs_brief",
+                                       "published", "status", "album", "idea", "mode")},
+            "lane": flow.lane(running=bool(run), queued=item["id"] in queue, has_text=has_text,
+                              published=item["published"], problems=problems, needs_brief=item.get("needs_brief")),
+            "issues": problems,
+            "cover": cover,
+            "source": web.get("source"),
+            "words": len(batches.final_text(path).split()) if has_text else 0,
+            "job": run.to_dict() if run else None,
+            "queue_position": queue.index(item["id"]) + 1 if item["id"] in queue else None,
+        }
+
+    def overview(self) -> dict[str, Any]:
+        today = date.today()
+        since = time.time() - ACTIVE_DAYS * 86400
+        running = {job.post_id: job for job in self.running_jobs()}
+        queue = list(self.queue)
+        cards = []
+        for item in self.list_posts():
+            active = (
+                item["id"] in running or item["id"] in queue
+                or (item.get("scheduled_for") and item["scheduled_for"] >= (today.isoformat()))
+                or item["modified"] >= since
+            )
+            if not active:
+                continue
+            card = self._post_view(item, running, queue)
+            if card["lane"] == "inbox" and not (item.get("needs_brief") or item.get("scheduled_for")):
+                continue  # стара чернова без текст и без дата — тя е в историята, не в потока
+            cards.append(card)
+        lanes: dict[str, list[dict[str, Any]]] = {k: [] for k in ("inbox", "writing", "review", "ready", "published")}
+        for card in cards:
+            lanes[card["lane"]].append(card)
+        key = lambda c: (c.get("scheduled_for") or "9999", c.get("scheduled_time") or "")  # noqa: E731
+        for name in lanes:
+            lanes[name].sort(key=key, reverse=name == "published")
+
+        # Пост-папки, които още не са станали пост (стари или при изключено автоматично взимане)
+        cfg = self.ingest_settings()
+        linked = {p.get("album") for p in self.list_posts() if p.get("album")}  # взети и през асистента/„Пост от албума"
+        waiting = []
+        for album in self._post_folders():
+            if album["path"] in cfg["ingested"] or album["path"] in linked:
+                continue
+            meta, _ = flow.parse_header(album["brief"])
+            when, at = flow.when_from(album["name"], meta)
+            waiting.append({"path": album["path"], "title": flow.title_from(album["name"], meta), "when": when,
+                            "at": at, "count": album["count"], "cover": album["cover"]})
+
+        finished = sorted((j for j in self.jobs.values() if j.state == "done" and j.kind == "generate" and j.finished),
+                          key=lambda j: j.finished, reverse=True)[:10]
+        upcoming = [c for c in lanes["ready"] + lanes["review"] + lanes["writing"] if c.get("scheduled_for")]
+        upcoming.sort(key=key)
+        return {
+            "lanes": lanes,
+            "folder_waiting": waiting,
+            "attention": [c for c in lanes["review"] + lanes["inbox"] if c["issues"]],
+            "next": upcoming[0] if upcoming else None,
+            "agents": {
+                "max_jobs": self.max_jobs,
+                "running": [{"post_id": j.post_id, "title": next((c["title"] for c in cards if c["id"] == j.post_id), j.post_id),
+                             **j.to_dict()} for j in running.values()],
+                "queued": [{"post_id": p, "title": next((c["title"] for c in cards if c["id"] == p), p), "position": i + 1}
+                           for i, p in enumerate(queue)],
+                "avg_seconds": round(sum(j.finished - j.started for j in finished) / len(finished)) if finished else None,
+                "done_today": sum(1 for j in self.jobs.values() if j.state == "done" and j.finished
+                                  and date.fromtimestamp(j.finished) == today),
+                "failed_today": sum(1 for j in self.jobs.values() if j.state == "error" and j.finished
+                                    and date.fromtimestamp(j.finished) == today),
+            },
+            "ingest": {"auto": cfg["auto"], "folder": (self.library_folder() or Path("")).name or None},
+            "alerts": alerts.summary(self.posts_dir),
+        }
+
+    def _review_alerts(self, job: Job, state: str) -> None:
+        """Сигнал, когато писането на насрочен/взет от папката пост не мине или носи риск."""
+        path = self.posts_dir / job.post_id
+        if not path.is_dir() or job.kind == "repick":
+            return
+        web = _read_web(path)
+        if not (web.get("scheduled_for") or web.get("source") == "folder" or web.get("batch")):
+            return  # ръчен пост в чата — човекът гледа екрана, не му трябва сигнал
+        if state == "error":
+            self.alert("writing_failed", "error", f"{job.error or 'Агентът не завърши.'} Отворете поста и натиснете „Опитай пак“.",
+                       post_id=job.post_id)
+            return
+        if state != "done":
+            return
+        item = next((p for p in self.list_posts() if p["id"] == job.post_id), None)
+        if item is None:
+            return
+        view = self._post_view(item, {}, [])
+        if any(p["kind"] == "time" for p in view["issues"]) and not web.get("auto_time_fix") and job.kind == "generate":
+            # „вчера/утре" в пост за друг ден — агентът сам го поправя веднъж (лека редакция, ~30 s);
+            # човекът пак одобрява. Сигнал — само ако и след това остане.
+            web["auto_time_fix"] = round(time.time())
+            write_json(path / "web.json", web)
+            self._append_message(path, {"role": "agent", "kind": "note", "text": (
+                f"Текстът казва „вчера/утре…“, а излиза на {item['scheduled_for']} — поправям го сам с конкретни дати.")})
+            try:
+                self.revise(job.post_id, (
+                    "Смени думите за време, които зависят от деня на четене (днес, утре, вчера, тази седмица и т.н.), "
+                    f"с конкретни дати. Постът излиза на {item['scheduled_for']}. Не пипай нищо друго."))
+                return
+            except HttpError:
+                pass  # пълна опашка/зает — остава за човека, със сигнал по-долу
+        serious = [p for p in view["issues"] if p["level"] in ("error", "warn") and p["kind"] != "stale"]
+        if serious:
+            self.alert("needs_review", serious[0]["level"], " · ".join(p["text"] for p in serious), post_id=job.post_id)
+        else:
+            alerts.resolve_for_post(self.posts_dir, job.post_id, REVIEW_ALERT_KINDS)
+
+    # ---------------------------------------------------------------- сигнали
+
+    def alert(self, kind: str, level: str, message: str, *, post_id: str | None = None, key: str | None = None) -> dict[str, Any]:
+        title = None
+        if post_id:
+            path = self.posts_dir / post_id
+            web = _read_web(path) if path.is_dir() else {}
+            title = web.get("title") or _brief_title(read_text_or_none(path / "briefing.md") or "") or post_id
+        return alerts.raise_alert(
+            self.posts_dir, kind=kind, level=level, message=message, key=key or f"{kind}:{post_id}",
+            post_id=post_id, post_title=title, sender=self.alert_sender,
+        )
+
+    def start_scheduler(self) -> None:
+        def loop() -> None:
+            last_ingest = 0.0
+            while not self._stop.wait(SCHEDULER_SECONDS):
+                try:
+                    self.scheduler_tick()
+                    if time.monotonic() - last_ingest >= INGEST_SECONDS:
+                        last_ingest = time.monotonic()
+                        self.ingest_tick()
+                except Exception:  # noqa: BLE001 — проверката не бива да спира сървъра
+                    traceback.print_exc()
+
+        threading.Thread(target=loop, name="scheduler", daemon=True).start()
+
+    # ---------------------------------------------------------------- папката на компютъра (web-ui-3)
+
+    def library_folder(self) -> Path | None:
+        return library.get_folder(self.posts_dir)
+
+    def library_scan(self) -> dict[str, Any] | None:
+        folder = self.library_folder()
+        return library.scan(folder) if folder else None
+
+    def _copy_album(self, path: Path, folder: Path, rel: str) -> int:
+        try:
+            images = library.album_images(folder, rel)
+        except library.LibraryError as exc:
+            raise HttpError(400, str(exc)) from exc
+        names = []
+        for index, image in enumerate(images):
+            name = uploads.copy_in(path, image)
+            if index >= uploads.MAX_AGENT_PHOTOS:
+                uploads.set_included(path, name, False)  # над тавана — качени, но изключени
+            else:
+                names.append(name)
+        self.add_pending(path, names)
+        web = _read_web(path)
+        web["album"] = rel
+        write_json(path / "web.json", web)
+        return len(images)
+
+    def attach_album(self, post_id: str, rel: str) -> int:
+        path = self.post_dir(post_id)
+        self._ensure_idle_for(post_id)
+        folder = self.library_folder()
+        if folder is None:
+            raise HttpError(409, "Първо изберете папка в „Папка“.")
+        return self._copy_album(path, folder, rel)
+
+    def library_schedule(self, rel: str) -> dict[str, Any]:
+        """Чете файл с график направо от папката — без качване — и казва колко снимки намира на ред."""
+        folder = self.library_folder()
+        if folder is None:
+            raise HttpError(409, "Първо изберете папка в „Папка“.")
+        try:
+            target = library.resolve(folder, rel)
+            if not target.is_file() or target.stat().st_size > MAX_SCHEDULE_BYTES:
+                raise HttpError(400, "Няма такъв файл или е твърде голям.")
+            parsed = schedule.parse_schedule(target.name, target.read_bytes())
+        except (library.LibraryError, schedule.ScheduleError) as exc:
+            raise HttpError(400, str(exc)) from exc
+        except OSError as exc:
+            raise HttpError(400, "Не мога да прочета файла — отворен ли е в Excel?") from exc
+        rows = []
+        for row in parsed.rows:
+            photos = library.resolve_photos(folder, row.photos, row.date)
+            rows.append({**row.to_dict(), "photo_count": len(photos),
+                         "photo_names": [p.name for p in photos[:6]]})
+        return {"rows": rows, "warnings": parsed.warnings, "source": rel}
+
+    def attach_batch_photos(self, batch: dict[str, Any]) -> None:
+        """След create_batch от папката: снимките на всеки ред — копирани от диска, без качване."""
+        folder = self.library_folder()
+        if folder is None:
+            return
+        for item in batch.get("items", []):
+            path = self.posts_dir / item["post_id"]
+            for photo in library.resolve_photos(folder, item.get("photos") or [], item.get("date")):
+                name = uploads.copy_in(path, photo)
+                if uploads.included_count(path) > uploads.MAX_AGENT_PHOTOS:
+                    uploads.set_included(path, name, False)
+
+    # ---------------------------------------------------------------- асистент (web-ui-3)
+
+    def _assistant_client(self) -> Any:
+        if self._client_factory is not None:
+            return self._client_factory()
+        import dataclasses
+
+        from src.llm.client import LLMClient
+
+        try:
+            config = load_config()
+        except ConfigError as exc:
+            raise HttpError(503, str(exc)) from exc
+        # Разговорът трябва да отговаря за секунди, не за минути: само ТОЗИ клиент пита модела
+        # без скрити разсъждения (конвейерът за писане е в отделен процес и не се засяга).
+        # Измерено 2026-10-14: план за месец с thinking — 2:35 мин. ASSISTANT_THINKING=1 го връща.
+        if os.environ.get("ASSISTANT_THINKING", "").strip().lower() not in ("1", "true", "да"):
+            config = dataclasses.replace(config, no_thinking_roles=frozenset(config.no_thinking_roles) | {"planner"})
+        return LLMClient(config)
+
+    def assistant_message(self, thread_id: str, text: str, mode: str | None = None) -> dict[str, Any]:
+        from src.errors import AgentError
+
+        client = self._assistant_client()
+        try:
+            thread = assistant.respond(
+                self.posts_dir, thread_id, text,
+                client=client, calendar=self.list_posts(), library_scan=self.library_scan(), mode=mode,
+            )
+        except assistant.AssistantError as exc:
+            raise HttpError(409, str(exc)) from exc
+        except AgentError as exc:
+            raise HttpError(502, exc.human_message) from exc
+        last = thread["messages"][-1]
+        if last.get("write_now"):
+            # Асистентът и „нов пост" са едно място: описано събитие → постът се пише веднага.
+            last["post_id"] = self._write_from_plan(last["plan"][0], text)
+            assistant.save_thread(self.posts_dir, thread)
+        return thread
+
+    def _write_from_plan(self, item: dict[str, Any], message: str) -> str:
+        post_id = self.create_post(item["brief"], item["mode"])
+        path = self.posts_dir / post_id
+        folder = self.library_folder()
+        if item.get("album") and folder:
+            self._copy_album(path, folder, item["album"])
+        if item["date"] > date.today().isoformat():
+            web = _read_web(path)
+            web.update({"scheduled_for": item["date"], "scheduled_time": item["time"]})
+            write_json(path / "web.json", web)
+        try:
+            job = self.generate(post_id, item["brief"], item["mode"], message=message)
+        except HttpError as exc:
+            # Пълна опашка и т.н. — постът стои с брифа; човекът го пуска от чата му.
+            self._append_message(path, {"role": "agent", "kind": "error", "text": exc.message})
+            return post_id
+        return job.post_id
+
+    def apply_plan(self, thread_id: str, index: int, items: list[dict[str, Any]], name: str | None) -> dict[str, Any]:
+        """Одобреното от човека предложение → постове в календара; тези с бриф тръгват да се пишат."""
+        try:
+            thread = assistant.load_thread(self.posts_dir, thread_id)
+        except assistant.AssistantError as exc:
+            raise HttpError(404, str(exc)) from exc
+        folder = self.library_folder()
+        album_list = library.scan(folder)["albums"] if folder else []
+        # Празен бриф + албум с текст → текстът от папката (написан от човека) е брифът (clean_plan).
+        albums = {a["path"]: a.get("brief") for a in album_list}
+        plan, _ = assistant.clean_plan(items, date.today(), albums)
+        if not plan:
+            raise HttpError(400, "В плана няма нито един ред с бъдеща дата.")
+        batch = batches.make_batch(_plan_name(plan), f"Асистент: {thread.get('title') or ''}"[:200], [])
+        to_write = []
+        for row, item in enumerate(plan, start=1):
+            post_id = self.create_post(item["brief"], item["mode"])
+            path = self.posts_dir / post_id
+            web = _read_web(path)
+            web.update({
+                "auto_name": False, "batch": batch["id"], "title": item["title"],
+                "scheduled_for": item["date"], "scheduled_time": item["time"],
+            })
+            if item["needs_brief"]:
+                web["needs_brief"] = True
+                if item.get("idea"):
+                    web["idea"] = item["idea"]
+            write_json(path / "web.json", web)
+            if item["album"] and folder:
+                self._copy_album(path, folder, item["album"])
+            batch["items"].append({
+                "post_id": post_id, "row": row, "date": item["date"], "title": item["title"],
+                "photos": [item["album"]] if item["album"] else [],
+            })
+            if not item["needs_brief"]:
+                to_write.append(post_id)
+        batches.save_batch(self.posts_dir, batch)
+        if to_write:
+            self.start_batch(batch["id"], to_write)
+        assistant.mark_applied(self.posts_dir, thread_id, index, batch["id"], len(plan))
+        return {"batch": self.batch_status(batch["id"]), "thread": assistant.load_thread(self.posts_dir, thread_id)}
+
+    def home(self) -> dict[str, Any]:
+        posts = self.list_posts()
+        scan = self.library_scan()
+        today = date.today().isoformat()
+        return {
+            "suggestions": insights.suggestions(posts, scan, today),
+            "folder": scan["name"] if scan else None,
+            "upcoming": sorted(
+                (p for p in posts if (p.get("scheduled_for") or "") >= today),
+                key=lambda p: (p["scheduled_for"], p.get("scheduled_time") or ""),
+            )[:6],
+        }
+
+
+_MONTHS_SHORT = ("яну", "фев", "мар", "апр", "май", "юни", "юли", "авг", "сеп", "окт", "ное", "дек")
+
+
+def _plan_name(plan: list[dict[str, Any]]) -> str:
+    """„3 поста · 21 окт – 4 ное" — кратко име за историята, не цялото съобщение на човека."""
+    def short(iso: str) -> str:
+        y, m, d = iso.split("-")
+        return f"{int(d)} {_MONTHS_SHORT[int(m) - 1]}"
+
+    count = f"{len(plan)} {'пост' if len(plan) == 1 else 'поста'}"
+    first, last = plan[0]["date"], plan[-1]["date"]
+    return f"{count} · {short(first)}" + (f" – {short(last)}" if last != first else "")
+
+
+def _written_on(path: Path) -> str | None:
+    """Денят, в който е написан текстът, който човекът вижда (ръчна редакция или предложението)."""
+    for name in ("edited.md", "post.md"):
+        target = path / "output" / name
+        if target.exists():
+            return datetime.fromtimestamp(target.stat().st_mtime).date().isoformat()
+    return None
+
+
+def _text_hash(text: str) -> str:
+    return hashlib.sha1(text.strip().encode("utf-8")).hexdigest()[:16]
 
 
 def _read_web(path: Path) -> dict[str, Any]:
@@ -974,11 +1787,6 @@ def _brief_title(brief: str) -> str:
         if line:
             return line[:110]
     return ""
-
-
-def _mode_options() -> list[dict[str, Any]]:
-    hints = {"kadar": "кратко, 40–90 думи", "fokus": "стандартно", "panorama": "дълго, 400–650 думи"}
-    return [{"key": m.key, "label": m.label, "hint": hints.get(m.key, "")} for m in modes.MODES.values()]
 
 
 # --------------------------------------------------------------------------- HTTP
@@ -1084,7 +1892,7 @@ class _Handler(BaseHTTPRequestHandler):
                 handler(self, *(unquote(group) for group in match.groups()), query=query)
             except HttpError as exc:
                 self._json({"error": exc.message}, exc.status)
-            except (BrokenPipeError, ConnectionResetError):
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
                 pass
             except Exception:  # noqa: BLE001
                 traceback.print_exc()
@@ -1125,7 +1933,7 @@ class _Handler(BaseHTTPRequestHandler):
     def r_info(self, *, query) -> None:
         settings = self.app.publish_settings()
         self._json({
-            "modes": _mode_options(),
+            "modes": insights.mode_options(self.app.posts_dir),
             "default_mode": modes.DEFAULT_MODE,
             "config_error": self.app.config_problem(),
             "max_agent_photos": uploads.MAX_AGENT_PHOTOS,
@@ -1134,7 +1942,18 @@ class _Handler(BaseHTTPRequestHandler):
             "queued": len(self.app.queue),
             "publish_mode": settings.mode,
             "publish_problem": settings.problem(),
+            "alerts": alerts.summary(self.app.posts_dir),
+            "alert_channels": alerts.channels_from_env() if self.app.alert_sender else {"webhook": False, "email": False},
+            "tutorial": self.app.tutorial_state(),
+            "ui_version": UI_VERSION,
         })
+
+    def r_settings(self, *, query) -> None:
+        self._json(self.app.settings_view())
+
+    def r_tutorial_set(self, *, query) -> None:
+        data = self._read_json()
+        self._json(self.app.set_tutorial(str(data.get("state") or ""), data.get("step")))
 
     def r_posts(self, *, query) -> None:
         self._json({"posts": self.app.list_posts()})
@@ -1307,6 +2126,8 @@ class _Handler(BaseHTTPRequestHandler):
         data = self._read_json()
         rows = schedule.rows_from_payload(data.get("rows") if isinstance(data.get("rows"), list) else [])
         batch = self.app.create_batch(str(data.get("name") or ""), data.get("source"), rows, data.get("mode"))
+        if data.get("library"):
+            self.app.attach_batch_photos(batch)  # снимките идват направо от папката на компютъра
         if data.get("start"):
             self.app.start_batch(batch["id"])
         self._json(self.app.batch_status(batch["id"]), 201)
@@ -1336,6 +2157,154 @@ class _Handler(BaseHTTPRequestHandler):
     def r_batch_csv(self, batch_id: str, *, query) -> None:
         status = self.app.batch_status(batch_id, full=True)
         self._send(200, batches.result_csv(status["items"]), "text/csv; charset=utf-8")
+    # ---------------------------------------------------------------- web-ui-3: папка, асистент, насрочване
+
+    def _local_only(self) -> None:
+        """Изборът на папка разглежда диска — само от самия компютър, никога от мрежата."""
+        if not _is_loopback(self.client_address[0]):
+            raise HttpError(403, "Папката се избира само от компютъра, на който работи агентът.")
+
+    def r_home(self, *, query) -> None:
+        self._json(self.app.home())
+
+    def r_library(self, *, query) -> None:
+        scan = self.app.library_scan()
+        self._json({"library": scan, "can_choose": _is_loopback(self.client_address[0])})
+
+    def r_library_set(self, *, query) -> None:
+        self._local_only()
+        data = self._read_json()
+        try:
+            library.set_folder(self.app.posts_dir, str(data.get("folder") or "").strip() or None)
+        except library.LibraryError as exc:
+            raise HttpError(400, str(exc)) from exc
+        insights.clear_cache()
+        self._json({"library": self.app.library_scan(), "can_choose": True})
+
+    def r_library_browse(self, *, query) -> None:
+        self._local_only()
+        self._json(library.browse((query.get("path") or [""])[0] or None))
+
+    def r_library_image(self, *, query) -> None:
+        folder = self.app.library_folder()
+        if folder is None:
+            raise HttpError(404, "Няма избрана папка.")
+        try:
+            source = library.resolve(folder, (query.get("path") or [""])[0])
+        except library.LibraryError as exc:
+            raise HttpError(404, str(exc)) from exc
+        thumb = library.thumbnail(source, self.app.posts_dir / library.THUMBS_DIR, (query.get("size") or ["s"])[0])
+        if thumb is None:
+            raise HttpError(404, "Няма такава снимка.")
+        self._file(thumb, "image/jpeg", "private, max-age=3600")
+
+    def r_library_schedule(self, *, query) -> None:
+        data = self._read_json()
+        self._json(self.app.library_schedule(str(data.get("path") or "")))
+
+    def r_library_album(self, *, query) -> None:
+        data = self._read_json()
+        rel = str(data.get("path") or "")
+        post_id = self.app.create_post("", data.get("mode"))
+        path = self.app.posts_dir / post_id
+        web = _read_web(path)
+        web["title"] = (rel.rsplit("/", 1)[-1] or "Албум")[:120]
+        write_json(path / "web.json", web)
+        self.app.attach_album(post_id, rel)
+        state = self.app.post_state(post_id)
+        folder = self.app.library_folder()
+        album = next((a for a in library.scan(folder)["albums"] if a["path"] == rel), None) if folder else None
+        state["album_brief"] = album.get("brief") if album else None  # текстът от папката → в полето за писане
+        self._json(state, 201)
+
+    def r_post_album(self, post_id: str, *, query) -> None:
+        data = self._read_json()
+        count = self.app.attach_album(post_id, str(data.get("path") or ""))
+        self._json({"added": count, **self.app.post_state(post_id)})
+
+    def r_schedule_set(self, post_id: str, *, query) -> None:
+        data = self._read_json()
+        info = self.app.set_schedule(
+            post_id, when=data.get("date"), at=data.get("time"),
+            approved=data.get("approved") if "approved" in data else None,
+        )
+        self._json(info)
+
+    def r_threads(self, *, query) -> None:
+        self._json({"threads": assistant.list_threads(self.app.posts_dir)})
+
+    def r_thread_create(self, *, query) -> None:
+        self._read_json()
+        self._json(assistant.create_thread(self.app.posts_dir), 201)
+
+    def r_thread(self, thread_id: str, *, query) -> None:
+        try:
+            self._json(assistant.load_thread(self.app.posts_dir, thread_id))
+        except assistant.AssistantError as exc:
+            raise HttpError(404, str(exc)) from exc
+
+    def r_thread_delete(self, thread_id: str, *, query) -> None:
+        try:
+            assistant.delete_thread(self.app.posts_dir, thread_id)
+        except assistant.AssistantError as exc:
+            raise HttpError(404, str(exc)) from exc
+        self._json({"ok": True})
+
+    def r_thread_message(self, thread_id: str, *, query) -> None:
+        data = self._read_json()
+        self._json(self.app.assistant_message(thread_id, str(data.get("text") or ""), data.get("mode")))
+
+    def r_overview(self, *, query) -> None:
+        self._json(self.app.overview())
+
+    def r_ingest_set(self, *, query) -> None:
+        data = self._read_json()
+        self._json(self.app.set_auto_ingest(bool(data.get("auto"))))
+
+    def r_ingest_now(self, *, query) -> None:
+        data = self._read_json()
+        paths = data.get("paths") if isinstance(data.get("paths"), list) else []
+        created = [self.app.ingest_album(str(p)) for p in paths[:60]]
+        self._json({"created": created}, 201)
+
+    def r_inbox_post(self, *, query) -> None:
+        data = self._read_json()
+        self._json(self.app.inbox_post(str(data.get("name") or ""), str(data.get("text") or ""),
+                                       str(data.get("batch") or "") or None), 201)
+
+    def r_inbox_batch(self, *, query) -> None:
+        data = self._read_json()
+        self._json(self.app.inbox_batch(str(data.get("name") or "")), 201)
+
+    def r_inbox_start(self, post_id: str, *, query) -> None:
+        self._read_json()
+        self._json(self.app.inbox_start(post_id))
+
+    def r_rewrite_source(self, post_id: str, *, query) -> None:
+        self._read_json()
+        job = self.app.rewrite_from_source(post_id)
+        self._json({"job": job.to_dict(), "post_id": job.post_id})
+
+    def r_alerts(self, *, query) -> None:
+        self._json({"alerts": alerts.list_alerts(self.app.posts_dir)})
+
+    def r_alert_resolve(self, alert_id: str, *, query) -> None:
+        self._read_json()
+        if not alerts.resolve(self.app.posts_dir, alert_id):
+            raise HttpError(404, "Няма такъв отворен сигнал.")
+        self._json(alerts.summary(self.app.posts_dir))
+
+    def r_alert_test(self, *, query) -> None:
+        self._read_json()
+        alert = self.app.alert("test", "action",
+                               "Проба: ако виждате това в Teams/Slack/имейл, сигналите работят.",
+                               key=f"test:{uuid.uuid4().hex[:6]}")
+        self._json({"alert": alert, "sending": bool(self.app.alert_sender)}, 201)
+
+    def r_thread_apply(self, thread_id: str, *, query) -> None:
+        data = self._read_json()
+        items = data.get("items") if isinstance(data.get("items"), list) else []
+        self._json(self.app.apply_plan(thread_id, int(data.get("index") or 0), items, data.get("name")), 201)
 
 
 _P = r"([^/]+)"
@@ -1343,6 +2312,8 @@ _ROUTES: list[tuple[str, re.Pattern[str], Callable[..., None]]] = [
     ("GET", re.compile(r"/"), _Handler.r_index),
     ("GET", re.compile(r"/static/([A-Za-z0-9._-]+)"), _Handler.r_static),
     ("GET", re.compile(r"/api/info"), _Handler.r_info),
+    ("GET", re.compile(r"/api/settings"), _Handler.r_settings),
+    ("PUT", re.compile(r"/api/settings/tutorial"), _Handler.r_tutorial_set),
     ("GET", re.compile(r"/api/posts"), _Handler.r_posts),
     ("POST", re.compile(r"/api/posts"), _Handler.r_create),
     ("GET", re.compile(rf"/api/posts/{_P}"), _Handler.r_post),
@@ -1370,6 +2341,31 @@ _ROUTES: list[tuple[str, re.Pattern[str], Callable[..., None]]] = [
     ("POST", re.compile(rf"/api/batches/{_P}/stop"), _Handler.r_batch_stop),
     ("GET", re.compile(rf"/api/batches/{_P}/export\.zip"), _Handler.r_batch_export),
     ("GET", re.compile(rf"/api/batches/{_P}/result\.csv"), _Handler.r_batch_csv),
+    ("GET", re.compile(r"/api/home"), _Handler.r_home),
+    ("GET", re.compile(r"/api/library"), _Handler.r_library),
+    ("PUT", re.compile(r"/api/library"), _Handler.r_library_set),
+    ("GET", re.compile(r"/api/library/browse"), _Handler.r_library_browse),
+    ("GET", re.compile(r"/api/library/image"), _Handler.r_library_image),
+    ("POST", re.compile(r"/api/library/schedule"), _Handler.r_library_schedule),
+    ("POST", re.compile(r"/api/library/album"), _Handler.r_library_album),
+    ("POST", re.compile(rf"/api/posts/{_P}/album"), _Handler.r_post_album),
+    ("PUT", re.compile(rf"/api/posts/{_P}/schedule"), _Handler.r_schedule_set),
+    ("GET", re.compile(r"/api/assistant"), _Handler.r_threads),
+    ("POST", re.compile(r"/api/assistant"), _Handler.r_thread_create),
+    ("GET", re.compile(rf"/api/assistant/{_P}"), _Handler.r_thread),
+    ("DELETE", re.compile(rf"/api/assistant/{_P}"), _Handler.r_thread_delete),
+    ("POST", re.compile(rf"/api/assistant/{_P}/messages"), _Handler.r_thread_message),
+    ("POST", re.compile(rf"/api/assistant/{_P}/apply"), _Handler.r_thread_apply),
+    ("GET", re.compile(r"/api/alerts"), _Handler.r_alerts),
+    ("GET", re.compile(r"/api/overview"), _Handler.r_overview),
+    ("PUT", re.compile(r"/api/ingest"), _Handler.r_ingest_set),
+    ("POST", re.compile(r"/api/ingest"), _Handler.r_ingest_now),
+    ("POST", re.compile(r"/api/inbox"), _Handler.r_inbox_post),
+    ("POST", re.compile(r"/api/inbox/batch"), _Handler.r_inbox_batch),
+    ("POST", re.compile(rf"/api/inbox/{_P}/start"), _Handler.r_inbox_start),
+    ("POST", re.compile(rf"/api/posts/{_P}/rewrite-source"), _Handler.r_rewrite_source),
+    ("POST", re.compile(r"/api/alerts/test"), _Handler.r_alert_test),
+    ("POST", re.compile(rf"/api/alerts/{_P}/resolve"), _Handler.r_alert_resolve),
 ]
 
 
@@ -1389,8 +2385,24 @@ def _is_loopback(host: str) -> bool:
         return False
 
 
+class _ExclusiveServer(ThreadingHTTPServer):
+    """
+    Порт само за един процес. На Windows `allow_reuse_address` (подразбирането на http.server)
+    значи SO_REUSEADDR — и ВТОРИ сървър тихо заема същия порт, а заявките продължават към стария.
+    Видяно на живо 2026-10-14: стар процес от 15:43 отговаряше, „рестартът не помагаше“. С
+    изключителен порт вторият старт гърми и казва защо (виж serve()).
+    """
+
+    allow_reuse_address = os.name != "nt"
+
+    def server_bind(self) -> None:
+        if os.name == "nt" and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
+
+
 def make_server(app: WebApp, host: str, port: int) -> ThreadingHTTPServer:
-    server = ThreadingHTTPServer((host, port), _Handler)
+    server = _ExclusiveServer((host, port), _Handler)
     server.daemon_threads = True
     server.app = app  # type: ignore[attr-defined]
     return server
@@ -1421,12 +2433,17 @@ def serve(
         )
         return 2
 
-    app = WebApp(posts_dir, password=password, max_jobs=max_jobs)
+    app = WebApp(posts_dir, password=password, max_jobs=max_jobs, alert_sender=alerts.sender_from_env())
     try:
         server = make_server(app, host, port)
+        app.start_scheduler()
     except OSError as exc:
         app.close()
-        print(f"Не мога да заема порт {port} ({exc}). Вероятно интерфейсът вече работи — отворете http://localhost:{port}")
+        print(
+            f"Порт {port} е зает — вероятно агентът вече работи в друг прозорец. Затворете всички черни "
+            f"прозорци на агента и пуснете start_web.bat отново (той сам спира старите). "
+            f"Техническо: {exc}"
+        )
         return 1
 
     scheme = "http"

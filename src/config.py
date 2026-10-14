@@ -83,6 +83,13 @@ class Config:
     # `python -m src.cli spike` не покаже, че бекендът ги поддържа. Виж llm/client.py.
     no_thinking_roles: frozenset[str] = frozenset()
     structured_output: str = "off"  # "off" | "json_schema"
+    # Предпазител за ролите без „мислене" (research-plan-38): нормалният отговор идва за
+    # 5–40 s, но веднъж на живо Критикът без мислене зацикли до пълния 300 s таймаут. По-къс
+    # таван → по-бърз преход към резервния модел. 0 = без отделен таван.
+    no_thinking_timeout_seconds: int = 90
+    # Стъпка [8] (research-plan-38): след финалната проверка агентът сам маха недоказаните
+    # твърдения с една лека редакция. FINAL_AUTOFIX=0 връща старото „само докладвай".
+    final_autofix: bool = True
 
 
 _REQUIRED_VARS = (
@@ -175,4 +182,6 @@ def load_config(env_path: Path | None = None) -> Config:
             role.strip().lower() for role in os.environ.get("NO_THINKING_ROLES", "").split(",") if role.strip()
         ),
         structured_output=(os.environ.get("STRUCTURED_OUTPUT", "off").strip().lower() or "off"),
+        no_thinking_timeout_seconds=_int_env("NO_THINKING_TIMEOUT_SECONDS", 90),
+        final_autofix=os.environ.get("FINAL_AUTOFIX", "1").strip() not in ("0", "off", "false", "no"),
     )

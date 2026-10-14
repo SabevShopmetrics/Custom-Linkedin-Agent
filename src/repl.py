@@ -1722,6 +1722,15 @@ class Repl:
             else:
                 self.out(self.ink.dim(f"\n  (Окончателната проверка{label} не успя — прочетете поста внимателно.)"))
             return
+        if update.autofixed:
+            # Стъпка [8] (research-plan-38): показаният текст вече е сменен — показваме новия.
+            self.out(self.ink.ok(f"\n  ✓ Агентът махна сам{label} {len(update.autofixed)} недоказани неща:"))
+            for claim in update.autofixed:
+                self.out(self.ink.dim(f"    · {claim}"))
+            if is_current:
+                fixed = (update.post_dir / "output" / "post.md")
+                if fixed.exists():
+                    self._print_post(fixed.read_text(encoding="utf-8"))
         notes = update.notes if self.state.verbose else humanize_notes(update.notes)
         if not notes:
             self.out(self.ink.ok(f"\n  ✓ Окончателната проверка{label} завърши — няма нови бележки."))

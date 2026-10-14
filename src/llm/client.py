@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import base64
 import io
+import json
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -374,7 +375,9 @@ class LLMClient:
                 continue
             attempts += 1
             try:
-                return self._post_chat(fb_model, messages, temperature, role=role, schema=schema), attempts, True
+                return self._post_chat(
+                    fb_model, messages, temperature, role=role, schema=schema, fallback=True
+                ), attempts, True
             except Exception as exc:
                 _raise_if_auth_error(exc)
                 last_exc = exc
@@ -421,6 +424,19 @@ class LLMClient:
             }
         return payload
 
+    def _timeout_for(self, role: Role | None, *, fallback: bool = False) -> int:
+        """
+        Таймаут на една заявка. Ролите без „мислене" отговарят за 5–40 s; ако не са отговорили
+        за `no_thinking_timeout_seconds`, почти сигурно са зациклили (видяно на живо, план 38) —
+        по-добре бърз преход към резервния модел, отколкото 300 s чакане. Само за основния модел:
+        резервните получават пълния таймаут, иначе веригата се изреждаше по 90 s на модел.
+        """
+        timeout = self._config.request_timeout_seconds
+        cap = self._config.no_thinking_timeout_seconds
+        if not fallback and role is not None and cap > 0 and role.value in self._config.no_thinking_roles:
+            return min(timeout, cap)
+        return timeout
+
     def _post_chat(
         self,
         model: str,
@@ -430,6 +446,7 @@ class LLMClient:
         role: Role | None = None,
         schema: type[BaseModel] | None = None,
         extra: dict[str, Any] | None = None,
+        fallback: bool = False,
     ) -> str:
         # Единственото мрежово извикване в целия проект — стандартен OpenAI-съвместим
         # chat/completions endpoint. raise_for_status() превръща 4xx/5xx в изключение,
@@ -441,6 +458,13 @@ class LLMClient:
             **self._optional_payload(role, schema),
             **(extra or {}),
         }
+        timeout = self._timeout_for(role, fallback=fallback)
+        # Гарантиран JSON идва на парчета (research-plan-38): ограниченото декодиране понякога
+        # зацикля в безкраен празен текст (на живо: 7 286 интервала/табулации за 150 s, 1 от 3
+        # извиквания). На парчета това се вижда след секунди, не след целия таймаут.
+        stream = schema is not None and self._config.structured_output == "json_schema"
+        if stream:
+            body["stream"] = True
         response = requests.post(
             f"{self._config.openwebui_base_url}/chat/completions",
             headers={
@@ -448,9 +472,13 @@ class LLMClient:
                 "Content-Type": "application/json",
             },
             json=body,
-            timeout=self._config.request_timeout_seconds,
+            timeout=timeout,
+            **({"stream": True} if stream else {}),
         )
         response.raise_for_status()
+        content_type = str((getattr(response, "headers", None) or {}).get("Content-Type", ""))
+        if stream and "event-stream" in content_type:
+            return _read_stream(response, deadline=time.monotonic() + timeout)
         payload = response.json()
         try:
             return payload["choices"][0]["message"]["content"]
@@ -481,6 +509,50 @@ class LLMClient:
                 network_attempts=network_attempts or attempts,
             )
         )
+
+
+# Повече празни знаци в края на отговора от това = зациклил декодер (нормалният JSON има
+# по няколко интервала отстъп; на живо зацикленият стигна хиляди).
+RUNAWAY_WHITESPACE = 200
+
+
+class RunawayOutputError(Exception):
+    """Моделът зацикли в празен текст — прекъснато рано; същата заявка се опитва пак."""
+
+
+def _read_stream(response: Any, *, deadline: float) -> str:
+    """
+    Чете отговор на парчета (SSE, `data: {...}`) и го прекъсва, щом зацикли в празен текст
+    или мине общото време. Таймаутът на `requests` важи между парчетата, не за целия отговор —
+    затова отделен `deadline`, който пази същото поведение като при обикновената заявка.
+    """
+    parts: list[str] = []
+    trailing_ws = 0
+    try:
+        for line in response.iter_lines():
+            if time.monotonic() > deadline:
+                raise requests.ReadTimeout("отговорът не завърши в срока (на парчета)")
+            if not line or not line.startswith(b"data:"):
+                continue
+            data = line[5:].strip()
+            if data == b"[DONE]":
+                break
+            try:
+                delta = json.loads(data)["choices"][0].get("delta", {}).get("content") or ""
+            except (ValueError, KeyError, IndexError, TypeError, AttributeError):
+                continue
+            if not delta:
+                continue
+            parts.append(delta)
+            stripped = delta.rstrip()
+            trailing_ws = trailing_ws + len(delta) if not stripped else len(delta) - len(stripped)
+            if trailing_ws > RUNAWAY_WHITESPACE:
+                raise RunawayOutputError(f"зациклен празен текст след {sum(map(len, parts))} знака")
+    finally:
+        close = getattr(response, "close", None)
+        if close is not None:
+            close()
+    return "".join(parts)
 
 
 def _raise_if_auth_error(exc: Exception) -> None:

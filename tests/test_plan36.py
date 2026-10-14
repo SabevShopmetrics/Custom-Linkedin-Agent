@@ -219,7 +219,7 @@ def test_rejected_api_key_stops_immediately_without_retries_or_fallbacks(monkeyp
 def test_optional_speedups_are_off_by_default_and_scoped_when_on(monkeypatch):
     bodies = []
 
-    def fake_post(url, headers, json, timeout):
+    def fake_post(url, headers, json, timeout, **kwargs):  # stream=True при гарантиран JSON (план 38)
         bodies.append(json)
         return content_response('{"post_type": "x", "format": "само текст", "tone": "t", "needs_photos": false, '
                                 '"max_photo_count": 0, "is_sensitive": false}')

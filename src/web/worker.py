@@ -19,7 +19,8 @@
 Всичко друго в stdout се игнорира от сървъра. Грешките и traceback-ите отиват в stderr
 (сървърът ги пише в web-worker.log в папката на поста).
 
-След "done" процесът изчаква фоновата финална проверка [7] (daemon нишка) да завърши, иначе
+"done" идва СЛЕД фоновата финална проверка [7] и самопоправката [8] (research-plan-38) — „Готово"
+значи проверено. main() пак изчаква нишката за всеки случай (repick/стари пътища), иначе
 изходът от процеса би я убил и final_check би останал "pending" завинаги.
 """
 
@@ -86,6 +87,8 @@ class Timeline:
 
 def _short_error(exc: Exception) -> str:
     name = type(exc).__name__
+    if name == "RunawayOutputError":
+        return "моделът зацикли в празен текст — прекъснато, питам пак"
     if "Timeout" in name:
         return "изтече времето за отговор"
     status = getattr(getattr(exc, "response", None), "status_code", None)
@@ -194,6 +197,21 @@ class _StageHandler(logging.Handler):
         self._out(message)
 
 
+def await_final_check(post_dir: Path, out: Callable[[dict[str, Any]], None]) -> None:
+    """
+    „Готово" значи проверено (research-plan-38): задачата свършва СЛЕД финалната проверка [7] и
+    самопоправката [8], не преди тях. Иначе постът влизаше в „Готови", а текстът и бележките се
+    сменяха минути по-късно — и записаният в чата текст вече не беше този в поста.
+    """
+    name = f"final-check-{post_dir.name}"
+    threads = [t for t in threading.enumerate() if t.name == name]
+    if not threads:
+        return
+    out({"stage": "Последна проверка на готовия текст…"})
+    for thread in threads:
+        thread.join(timeout=FINAL_CHECK_WAIT_SECONDS)
+
+
 def run(spec: dict[str, Any], out: Callable[[dict[str, Any]], None], client_factory: Callable[[], Any] | None = None) -> int:
     """Изпълнява задачата и докладва през `out`. Връща код за изход (0 = успех)."""
     timeline = Timeline(out)
@@ -219,6 +237,8 @@ def run(spec: dict[str, Any], out: Callable[[dict[str, Any]], None], client_fact
             runner.refresh_photos(post_dir, client)
         else:
             raise ValueError(f"непозната задача: {kind}")
+        if kind in ("generate", "revise"):
+            await_final_check(post_dir, out)
         out({"state": "done"})
         return 0
     except ConfigError as exc:

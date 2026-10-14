@@ -74,7 +74,7 @@ from src.brand.loader import BrandKnowledge, load_brand_knowledge
 from src.errors import AgentError, BriefingMissingError, BriefingNotFilledError, CancelledByUserError
 from src.llm.client import LLMClient
 from src.logging_utils import setup_run_logger
-from src.pipeline import consolidator, critic, facts_pool, formatting, judge, media_picker, modes, planner, verifier, writer
+from src.pipeline import autofix, consolidator, critic, facts_pool, formatting, judge, media_picker, modes, planner, verifier, writer
 from src.pipeline.consolidator import PipelineResult
 from src.pipeline.util import read_json, read_text_or_none, write_json, write_text
 from src.quality.metrics import measure
@@ -105,6 +105,8 @@ class FinalCheckUpdate:
     notes: list[str] = field(default_factory=list)
     resolution_summary: str | None = None
     error: str | None = None
+    # [8] (research-plan-38): какво агентът махна сам след проверката — за бележка към човека.
+    autofixed: list[str] = field(default_factory=list)
 
 
 def _resolution_summary(initial_count: int, final_count: int) -> str:
@@ -669,7 +671,11 @@ def _run_pipeline_v3(
     else:
         log.info("[7] Критик върху предложението (async, информативно)...")
         thread = _start_async_final_check(
-            post_dir, client, knowledge, plan, briefing_text, official_text, findings=findings, on_final_check=on_final_check
+            post_dir, client, knowledge, plan, briefing_text, official_text, findings=findings, on_final_check=on_final_check,
+            fix_text=_make_fixer(
+                client, knowledge, briefing_text, official_text, mode,
+                has_photos=bool(media_selection.selected), today=today,
+            ),
         )
         if wait_for_final_check_seconds > 0:
             result = _await_final_check(thread, post_dir, result, wait_for_final_check_seconds, log)
@@ -866,7 +872,11 @@ def _run_pipeline_v5(
     # v3, без да променя изхода — чисто информативна и там). Виж _start_async_final_check
     # защо не пише през споделения logger.
     thread = _start_async_final_check(
-        post_dir, client, knowledge, plan, briefing_text, official_text, on_final_check=on_final_check
+        post_dir, client, knowledge, plan, briefing_text, official_text, on_final_check=on_final_check,
+        fix_text=_make_fixer(
+            client, knowledge, briefing_text, official_text, mode,
+            has_photos=bool(media_selection.selected), today=today,
+        ),
     )
     if wait_for_final_check_seconds > 0:
         result = _await_final_check(thread, post_dir, result, wait_for_final_check_seconds, log)
@@ -894,6 +904,41 @@ def _photo_notes(media_selection) -> tuple[list[str], list[str]]:
                 f"на брифа{reason_suffix} — прегледайте дали снимката пасва."
             )
     return notes, warnings
+
+
+def _final_autofix_enabled(client) -> bool:
+    return bool(getattr(getattr(client, "config", None), "final_autofix", True))
+
+
+def _make_fixer(
+    client,
+    knowledge: BrandKnowledge,
+    briefing_text: str,
+    official_text: str,
+    mode: modes.PostMode,
+    *,
+    has_photos: bool,
+    today: date | None,
+) -> Callable[[str], str] | None:
+    """
+    Затваря всичко нужно за стъпка [8] (autofix.py): една лека редакция от Писателя по тясна
+    молба + същите механични правила като при пълното пускане. None → стъпката е изключена
+    (FINAL_AUTOFIX=0 в .env).
+    """
+    if not _final_autofix_enabled(client):
+        return None
+    rules = _effective_format_rules(knowledge, mode)
+    founded_year = (knowledge.facts or {}).get("organization", {}).get("founded")
+
+    def fix(instruction: str) -> str:
+        revised = writer.revise_post(
+            client, knowledge, briefing_text, official_text, instruction, mode_instruction=mode.instruction
+        )
+        return formatting.enforce(
+            revised, rules, brief_text=briefing_text, has_photos=has_photos, founded_year=founded_year, today=today
+        ).text.strip()
+
+    return fix
 
 
 def _archive_current_post(post_dir: Path) -> Path | None:
@@ -1037,7 +1082,11 @@ def run_revision(
 
     log.info("[7] Критик върху ревизирания текст (async, информативно)...")
     thread = _start_async_final_check(
-        post_dir, client, knowledge, plan, briefing_text, official_text, on_final_check=on_final_check
+        post_dir, client, knowledge, plan, briefing_text, official_text, on_final_check=on_final_check,
+        fix_text=_make_fixer(
+            client, knowledge, briefing_text, official_text, mode_obj,
+            has_photos=bool(media_selection.selected), today=today,
+        ),
     )
     if wait_for_final_check_seconds > 0:
         result = _await_final_check(thread, post_dir, result, wait_for_final_check_seconds, log)
@@ -1100,6 +1149,51 @@ def refresh_photos(
     )
 
 
+def _run_autofix(
+    post_dir: Path,
+    log_path: Path,
+    final_critique,
+    final_notes: list[str],
+    official_text: str,
+    briefing_text: str,
+    fix_text: Callable[[str], str] | None,
+) -> tuple[list[str], list[str], dict[str, Any] | None]:
+    """
+    Стъпка [8] (src/pipeline/autofix.py). Връща (останалите бележки, махнатите твърдения,
+    запис за meta.json или None, ако не е опитвано). Не хвърля AgentError — при провал постът
+    остава какъвто беше, а бележките стигат до човека както досега.
+    """
+    if fix_text is None:
+        return final_notes, [], None
+    items = autofix.fixable_items(final_critique)
+    if not items:
+        return final_notes, [], None
+    if (post_dir / "output" / "edited.md").exists():
+        # Човекът вече е пипал текста — не го пренаписваме зад гърба му.
+        return final_notes, [], {"applied": False, "reason": "текстът е редактиран от човек"}
+    _append_run_log(log_path, f"[8] Самопоправка: {len(items)} неща за махане...")
+    try:
+        outcome = autofix.apply(official_text, fix_text(autofix.instruction_for(items)), briefing_text, items)
+    except AgentError as exc:
+        _append_run_log(log_path, f"[8] Самопоправката не мина: {exc.human_message}")
+        return final_notes, [], {"applied": False, "reason": exc.human_message}
+    if not outcome.applied:
+        _append_run_log(log_path, f"[8] Самопоправката е отхвърлена: {outcome.reason}")
+        return final_notes, [], {"applied": False, "reason": outcome.reason}
+    current = read_text_or_none(post_dir / "output" / "post.md") or ""
+    if current.strip() != official_text.strip():
+        # Междувременно е пусната ревизия/ново писане — този резултат вече е стар.
+        return final_notes, [], {"applied": False, "reason": "постът се смени междувременно"}
+    _archive_current_post(post_dir)
+    write_text(post_dir / "output" / "post.md", outcome.text + "\n")
+    fixed_notes = {item.note for item in outcome.fixed}
+    claims = [item.claim for item in outcome.fixed]
+    for claim in claims:
+        _append_run_log(log_path, f"[8] махнато: {claim}")
+    remaining = [note for note in final_notes if note not in fixed_notes]
+    return remaining, claims, {"applied": True, "fixed": len(claims), "left": len(remaining)}
+
+
 def _start_async_final_check(
     post_dir,
     client,
@@ -1110,6 +1204,7 @@ def _start_async_final_check(
     *,
     findings: list[str] | None = None,
     on_final_check: Callable[[FinalCheckUpdate], None] | None = None,
+    fix_text: Callable[[str], str] | None = None,
 ) -> threading.Thread:
     """
     Стъпка [7], извън критичния път — тече във фонов daemon thread, за да не блокира вече
@@ -1167,6 +1262,11 @@ def _start_async_final_check(
             for note in final_notes:
                 _append_run_log(log_path, f"[7] открит въпрос: {note}")
 
+            # [8] Самопоправка (research-plan-38): каквото е механично ясно, агентът маха сам.
+            final_notes, autofixed, autofix_meta = _run_autofix(
+                post_dir, log_path, final_critique, final_notes, official_text, briefing_text, fix_text
+            )
+
             # Само v3 подава findings (Критикът на Post I) — v5 няма аналог (пише N
             # независими кандидата, не Post I → Post II), затова там resolution_summary
             # остава None, точно както преди.
@@ -1176,15 +1276,20 @@ def _start_async_final_check(
                 _append_run_log(log_path, f"[7] {resolution_summary}")
 
             duration_seconds = round(time.monotonic() - started, 2)
+            final_check_meta: dict[str, Any] = {"status": "ok", "duration_seconds": duration_seconds}
+            if autofix_meta is not None:
+                final_check_meta["autofix"] = autofix_meta
             _merge_async_notes_into_meta(
                 post_dir,
                 final_notes,
                 resolution_summary=resolution_summary,
-                final_check={"status": "ok", "duration_seconds": duration_seconds},
+                final_check=final_check_meta,
+                extra_fixes=[f"Махнато след проверката: {claim}" for claim in autofixed],
             )
             _notify(
                 FinalCheckUpdate(
-                    post_dir=post_dir, status="ok", notes=final_notes, resolution_summary=resolution_summary
+                    post_dir=post_dir, status="ok", notes=final_notes, resolution_summary=resolution_summary,
+                    autofixed=autofixed,
                 )
             )
         except AgentError as exc:
@@ -1265,6 +1370,7 @@ def _merge_async_notes_into_meta(
     *,
     resolution_summary: str | None = None,
     final_check: dict[str, Any] | None = None,
+    extra_fixes: list[str] | None = None,
 ) -> None:
     """
     Дописва находките от асинхронната проверка в output/meta.json СЛЕД като той вече е
@@ -1300,4 +1406,6 @@ def _merge_async_notes_into_meta(
         meta["resolution_summary"] = resolution_summary
     if final_check is not None:
         meta["final_check"] = final_check
+    if extra_fixes:
+        meta["applied_fixes"] = list(meta.get("applied_fixes", [])) + list(extra_fixes)
     write_json(meta_path, meta)
