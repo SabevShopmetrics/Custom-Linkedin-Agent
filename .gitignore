@@ -15,7 +15,12 @@ dist/
 # резултати от реални постове — остават локално, не в git
 posts/*/
 !posts/_example/
+# избраната папка на компютъра (web-ui-3) — личен път, не в git
+posts/_settings.json
 
 # ОС
 .DS_Store
 Thumbs.db
+test-data/
+# сигнали на агента (web-ui-3) — работни данни, не в git
+posts/_alerts.json

@@ -125,8 +125,10 @@ SYSTEM_PROMPT_TEMPLATE = """\
 3. ПРАВИЛА — сверй срещу секциите ЗАБРАНЕНО/GDPR по-горе. Нарушение на ЗАБРАНЕНО
    (rule: "forbidden") е най-сериозната находка — тя ЗАДЪЛЖИТЕЛНО трябва да отпадне
    напълно във втората версия, не да се смекчи. Нарушение на GDPR (rule: "gdpr") също
-   влиза в rule_violations и също се маха от текста (напр. организация без потвърдено
-   съгласие просто не се споменава). Отделно провери: текстът приписва ли конкретно,
+   влиза в rule_violations и също се маха от текста (напр. организация, която НЕ е в брифа
+   и няма потвърдено съгласие, просто не се споменава). Организация, която човекът САМ е
+   написал в брифа, НЕ е GDPR нарушение — не я включвай в rule_violations (съгласието за
+   нея проверява човекът преди публикуване). Отделно провери: текстът приписва ли конкретно,
    пряко изказване/мнение/цитат на конкретно назовано лице (все едно е "Име сподели, че...",
    "„цитат" – Име", "Име, който отбеляза..." или друга формулировка) — ако да, това е
    GDPR находка, ДОРИ ако името идва дословно от брифа: публично цитиране обвързва човека
@@ -477,7 +479,8 @@ def run(
 
     system = SYSTEM_PROMPT_TEMPLATE.format(
         principle=CRITIC_PRINCIPLE,
-        brand_context=knowledge.stable_context or "(няма зареден brand контекст)",
+        brand_context=(knowledge.stable_context or "(няма зареден brand контекст)")
+        + _render_bad_examples_block(knowledge),
         facts_block=facts_block,
         members_block=members_block,
         post_type=plan.post_type,
@@ -498,6 +501,21 @@ def run(
 
     write_text(critique_path, _render_critique_markdown(critique))
     return critique
+
+
+def _render_bad_examples_block(knowledge: BrandKnowledge) -> str:
+    """
+    knowledge/examples/bad/ — досега се зареждаше, но не стигаше до нито един промпт
+    (research-plan-36, Г4). Само за Критика, не за Писателя: лош пример пред Писателя рискува
+    да бъде имитиран, пред Критика е мярка какво да хване. Празно, докато клъстерът не добави.
+    """
+    if not knowledge.bad_examples:
+        return ""
+    examples = "\n\n---\n\n".join(knowledge.bad_examples)
+    return (
+        "\n\n## ЛОШИ ПРИМЕРИ — какво клъстерът НЕ иска (за сравнение, не за подражание)\n\n"
+        f"{examples}"
+    )
 
 
 def _render_facts_block(knowledge: BrandKnowledge) -> str:
@@ -552,23 +570,33 @@ def enforce_code_level_rules(
     """
     violations = list(critique.rule_violations)
     lower_draft = draft_text.lower()
+    lower_brief = briefing_text.lower()
 
     # Проверка 1: организация, спомената в текста, чието mention_allowed не е true.
+    #
+    # Решение на потребителя 2026-10-09 (research-plan-36, Г2): ако човекът сам е написал
+    # името в брифа, то ОСТАВА в текста (from_brief=True → collect_findings не праща „махни" на
+    # Post II), а съгласието се проверява от човека преди публикуване. Реалните постове на
+    # клъстера благодарят на членове поименно; 0 от 83 члена имат записано съгласие, така че
+    # без това изключение всеки такъв пост ставаше „благодарим на всички участници".
     for member in members:
         name = member.get("name")
         if not name or member.get("mention_allowed") is True:
             continue
         for variant in _member_name_variants(name):
             if variant.lower() in lower_draft:
-                violations.append(
-                    RuleViolation(
-                        rule="gdpr",
-                        detail=(
-                            f"Организацията '{name}' е спомената в текста (като '{variant}'), но "
-                            f"mention_allowed не е потвърдено (true) в members.yaml."
-                        ),
+                from_brief = variant.lower() in lower_brief
+                if from_brief:
+                    detail = (
+                        f"Организацията '{name}' е от брифа и остава в текста — проверете ръчно, "
+                        f"че имат съгласие за публично споменаване (mention_allowed не е true)."
                     )
-                )
+                else:
+                    detail = (
+                        f"Организацията '{name}' е спомената в текста (като '{variant}'), но "
+                        f"mention_allowed не е потвърдено (true) в members.yaml."
+                    )
+                violations.append(RuleViolation(rule="gdpr", detail=detail, from_brief=from_brief))
                 break  # един violation на организация е достатъчен, не дублирай за всеки вариант
 
     # Проверка 2: низ, който прилича на лично име (виж _NAME_PATTERN), но не е дословно в брифа.
@@ -636,6 +664,10 @@ def enforce_code_level_rules(
                         f"Възможна непозната организация извън members.yaml: '{candidate}' — "
                         f"провери съгласие за публично споменаване ръчно, преди публикуване."
                     ),
+                    # Г2 (research-plan-36): името от брифа остава, бележката стига до човека.
+                    # Проверката остава безусловна спрямо брифа (план 23) — сменя се само дали
+                    # находката иска от Post II да го махне.
+                    from_brief=key in lower_brief,
                 )
             )
 
@@ -774,6 +806,10 @@ def collect_findings(critique: CritiqueSchema) -> list[str]:
 
     # Ред 1: нарушени правила — най-сериозното, трябва да отпадне напълно.
     for violation in critique.rule_violations:
+        if violation.rule == "gdpr" and violation.from_brief:
+            # Име, което човекът сам е написал в брифа — остава (research-plan-36, Г2). Стига до
+            # човека през review_notes на финалната проверка, не като задача за Post II.
+            continue
         if violation.rule == "gdpr":
             findings.append(
                 f"GDPR — махни това от текста, не го смекчавай: {violation.detail}"

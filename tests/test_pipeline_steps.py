@@ -833,3 +833,99 @@ def test_collect_findings_does_not_duplicate_unverified_fact_as_hedged():
     matches = [f for f in findings if "40 членове" in f]
     assert len(matches) == 1
     assert "Недоказано твърдение" in matches[0]
+
+
+def test_media_picker_prompt_keeps_all_attached_photos_but_drops_screenshots():
+    # Потребителски решения 2026-10-13: всички прикачени снимки влизат (план на залата също);
+    # скрийншоти от компютър — никога (реално пускане сложи терминал в поста).
+    from src.pipeline import media_picker
+
+    prompt = media_picker.SYSTEM_PROMPT_TEMPLATE.format()
+    assert "ВСИЧКИ влизат в поста" in prompt
+    assert "3D визуализация на залата" in prompt
+    assert "скрийншоти от компютър" in prompt and "терминал" in prompt
+
+
+
+
+def _review(kind="photo", strength=3, **extra):
+    from src.llm.schema import PhotoKind, PhotoReviewSchema
+
+    return PhotoReviewSchema(kind=PhotoKind(kind), description=f"{kind} {strength}", strength=strength, **extra)
+
+
+def test_media_picker_assemble_drops_screen_captures_and_orders_by_strength(tmp_path):
+    # 2026-10-13: една снимка = едно извикване; подредбата и изключването са правила в кода.
+    from src.pipeline import media_picker
+
+    photos = [tmp_path / n for n in ("plan.png", "people.jpg", "chat.png", "poster.png")]
+    reviews = [_review("graphic", 3), _review("photo", 5), _review("screen_capture", 1), _review("graphic", 3)]
+    result = media_picker._assemble(photos, reviews)
+    assert [item.filename for item in result.selected] == ["people.jpg", "plan.png", "poster.png"]
+    assert [item.filename for item in result.excluded] == ["chat.png"]
+    assert "скрийншот" in result.excluded[0].reason
+
+
+def test_media_picker_keeps_photo_whose_review_failed_and_flags_it_for_a_human(tmp_path):
+    from src.pipeline import media_picker
+
+    photos = [tmp_path / n for n in ("a.jpg", "b.jpg")]
+    result = media_picker._assemble(photos, [None, _review("photo", 2)])
+    assert [item.filename for item in result.selected] == ["b.jpg", "a.jpg"]
+    assert result.selected[1].possible_minor is True
+
+
+def test_media_picker_drops_near_duplicate_keeping_the_stronger(tmp_path):
+    from PIL import Image, ImageDraw
+
+    from src.pipeline import media_picker
+
+    image = Image.new("RGB", (400, 300), "white")
+    ImageDraw.Draw(image).rectangle((50, 40, 250, 200), fill="navy")
+    image.save(tmp_path / "big.png")
+    image.resize((200, 150)).save(tmp_path / "small.jpg", quality=70)  # същият кадър, друг размер
+    other = Image.new("RGB", (400, 300), "white")
+    ImageDraw.Draw(other).ellipse((150, 100, 390, 290), fill="darkred")
+    other.save(tmp_path / "other.png")
+
+    photos = [tmp_path / "small.jpg", tmp_path / "big.png", tmp_path / "other.png"]
+    result = media_picker._assemble(photos, [_review("photo", 2), _review("photo", 4), _review("photo", 3)])
+    assert [item.filename for item in result.selected] == ["big.png", "other.png"]
+    assert result.excluded[0].filename == "small.jpg" and "big.png" in result.excluded[0].reason
+
+
+def test_media_picker_caps_at_linkedin_limit(tmp_path):
+    from src.pipeline import media_picker
+
+    photos = [tmp_path / f"{i:02d}.jpg" for i in range(25)]  # несъществуващи — без хеш, без дубликати
+    result = media_picker._assemble(photos, [_review() for _ in photos])
+    assert len(result.selected) == media_picker.MAX_POST_PHOTOS == 20
+
+
+def test_media_picker_reviews_each_photo_in_its_own_call(tmp_path):
+    from src.errors import InvalidResponseError
+    from src.llm.schema import PhotoReviewSchema
+
+    post_dir = tmp_path / "post"
+    (post_dir / "photos").mkdir(parents=True)
+    for name in ("a.jpg", "b.jpg", "c.jpg"):
+        (post_dir / "photos" / name).write_bytes(b"x")
+    answers = {"a.jpg": _review("photo", 2), "b.jpg": _review("screen_capture", 1), "c.jpg": None}
+    calls = []
+
+    class PerPhotoClient:
+        def complete(self, role, prompt, *, system=None, images=None, schema=None):
+            assert schema is PhotoReviewSchema and len(images) == 1
+            calls.append(images[0].name)
+            answer = answers[images[0].name]
+            if answer is None:
+                raise InvalidResponseError("media", "m", 3)
+            return answer
+
+    plan = PlanSchema(post_type="x", format="y", tone="z", needs_photos=True, max_photo_count=3, is_sensitive=False)
+    selection, no_photos = media_picker.run(post_dir, PerPhotoClient(), plan, "бриф", force=False)
+
+    assert sorted(calls) == ["a.jpg", "b.jpg", "c.jpg"]
+    assert no_photos is False
+    assert [item.filename for item in selection.selected] == ["a.jpg", "c.jpg"]
+    assert [item.filename for item in selection.excluded] == ["b.jpg"]

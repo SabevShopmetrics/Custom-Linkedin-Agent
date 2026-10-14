@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="bg">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=resizes-content">
+<title>LinkedIn агент</title>
+<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/static/app.css">
+<link rel="stylesheet" href="/static/views.css">
+<link rel="stylesheet" href="/static/board.css">
+<link rel="stylesheet" href="/static/tour.css">
+<link rel="stylesheet" href="/static/overview.css">
+<script type="module" src="/static/app.js"></script>
+</head>
+<body data-view="overview">
+<div class="app">
+  <aside class="sidebar" id="sidebar" aria-label="Навигация">
+    <div class="side-head">
+      <a class="brand" href="#/" aria-label="Преглед — начало">
+        <span class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24"><path d="M3 15c2.5 0 2.5-2 5-2s2.5 2 5 2 2.5-2 5-2 2.5 2 3 2M3 19c2.5 0 2.5-2 5-2s2.5 2 5 2 2.5-2 5-2 2.5 2 3 2M12 3v7m-3-4 3-3 3 3"/></svg>
+        </span>
+        <span class="brand-text"><b>LinkedIn агент</b><small>ИКТ Клъстер – Варна</small></span>
+      </a>
+      <button class="icon-btn only-narrow" id="side-close" type="button" aria-label="Затвори менюто">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>
+      </button>
+    </div>
+    <nav class="side-nav" id="side-nav" aria-label="Изгледи"></nav>
+    <div class="side-search">
+      <input type="search" id="side-search" placeholder="Търси пост…" aria-label="Търси пост">
+    </div>
+    <div class="side-lists" id="side-lists"></div>
+    <button class="busy-chip" id="busy-chip" type="button" hidden>
+      <span class="dot"></span><span id="busy-text">Агентът пише…</span>
+    </button>
+  </aside>
+  <div class="scrim" id="scrim" hidden></div>
+
+  <div class="stage">
+    <header class="mobile-bar only-narrow">
+      <button class="icon-btn" id="side-open" type="button" aria-label="Меню">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
+      </button>
+      <b>LinkedIn агент</b>
+    </header>
+    <div class="banner warn" id="config-banner" hidden></div>
+
+    <section class="view" id="view-overview" aria-label="Преглед"></section>
+    <section class="view view-assistant" id="view-assistant" aria-label="Асистент" hidden></section>
+    <section class="view" id="view-calendar" aria-label="Календар" hidden></section>
+    <section class="view" id="view-library" aria-label="Папка" hidden></section>
+    <section class="view" id="view-alerts" aria-label="Сигнали" hidden></section>
+    <section class="view" id="view-settings" aria-label="Настройки" hidden></section>
+
+    <main class="view main" id="view-post" hidden>
+      <header class="main-head">
+        <h1 id="chat-title">Нов пост</h1>
+        <button class="head-btn" id="album-btn" type="button" title="Снимки от папката на компютъра">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z"/></svg>
+          <span>От папката</span>
+        </button>
+        <button class="head-btn" id="photos-btn" type="button" hidden>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v14H4zM4 15l4-4 4 4 3-3 5 5"/></svg>
+          <span id="photos-btn-text"></span>
+        </button>
+      </header>
+      <div class="thread" id="thread">
+        <div class="thread-inner" id="messages"></div>
+      </div>
+      <div class="composer-wrap">
+        <form class="composer" id="composer" autocomplete="off">
+          <div class="tray" id="tray" hidden></div>
+          <textarea id="prompt" rows="1" aria-label="Съобщение към агента"
+            placeholder="Какво се случи? Кой, какво, кога и защо е интересно…"></textarea>
+          <div class="composer-row">
+            <div id="modes" class="modes-slot"></div>
+            <span class="grow"></span>
+            <label class="plus" id="plus" title="Добави снимки или ZIP">
+              <input type="file" id="file-input" multiple accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp,.jfif,.zip,application/zip,.xlsx,.csv,.tsv,.txt,.md,.json">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+              <span class="sr-only">Добави снимки или ZIP</span>
+            </label>
+            <button class="send" id="send" type="submit" aria-label="Изпрати">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5m0 0-6 6m6-6 6 6"/></svg>
+            </button>
+          </div>
+        </form>
+        <p class="composer-hint">Enter — изпрати · Shift+Enter — нов ред · ↑ ↓ — стари съобщения · снимки и ZIP с + или „От папката“</p>
+      </div>
+    </main>
+
+    <section class="view board" id="board" aria-label="График" hidden></section>
+  </div>
+</div>
+
+<div class="modal" id="photos-modal" hidden role="dialog" aria-modal="true" aria-labelledby="photos-modal-title">
+  <div class="modal-box">
+    <header class="modal-head">
+      <div>
+        <h2 id="photos-modal-title">Снимки</h2>
+        <p class="modal-sub" id="photo-count"></p>
+      </div>
+      <button class="icon-btn" id="photos-close" type="button" aria-label="Затвори">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>
+      </button>
+    </header>
+    <p class="modal-hint">Натиснете снимка, за да я включите или изключите — агентът вижда само включените. <span id="star-help" hidden>Със ★ решавате кои влизат в самия пост.</span></p>
+    <div class="grid" id="photos"></div>
+    <footer class="modal-foot">
+      <span class="modal-links">
+        <button class="link-btn" id="include-all" type="button">Включи всички</button>
+        <button class="link-btn" id="exclude-all" type="button">Изключи всички</button>
+      </span>
+      <button class="btn ghost small" id="album-btn-2" type="button">От папката</button>
+      <label class="btn ghost small">
+        <input type="file" id="file-input-2" multiple accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp,.jfif,.zip,application/zip,.xlsx,.csv,.tsv,.txt,.md,.json">
+        + Качи
+      </label>
+      <button class="btn primary small" id="photos-done" type="button">Готово</button>
+    </footer>
+  </div>
+</div>
+
+<div class="drop-overlay" id="drop-overlay" hidden>
+  <div>
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m0 0-4 4m4-4 4 4M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
+    <b>Пуснете снимки или ZIP</b>
+    <span>ще ги разархивирам и добавя към поста</span>
+  </div>
+</div>
+
+<div class="lightbox" id="lightbox" hidden>
+  <img id="lightbox-img" alt="">
+</div>
+
+<div class="toasts" id="toasts" aria-live="polite"></div>
+</body>
+</html>

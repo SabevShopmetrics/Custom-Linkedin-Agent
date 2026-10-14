@@ -13,6 +13,17 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+# Средата ПРЕДИ първото load_dotenv в този процес. Нужна е на дълго живеещи процеси (уеб
+# сървъра), които пускат подпроцеси: load_dotenv пише .env в os.environ, детето го наследява и
+# заради override=False вече НЕ вижда промени в .env. На живо 2026-10-13: .env беше сменен на
+# REQUEST_TIMEOUT_SECONDS=300, а задачите от уеба продължаваха да режат заявките на 120 s.
+_ENV_BEFORE_DOTENV = frozenset(os.environ)
+
+
+def child_environ() -> dict[str, str]:
+    """Средата за подпроцес, който сам ще прочете .env наново — без стойностите, заредени от .env тук."""
+    return {key: value for key, value in os.environ.items() if key in _ENV_BEFORE_DOTENV}
+
 
 class ConfigError(Exception):
     """Липсваща или невалидна конфигурация в .env."""
@@ -32,7 +43,9 @@ class Config:
     model_consolidator: str
     model_fallback: str
 
-    request_timeout_seconds: int = 120
+    # 300, не 120 (research-plan-36, А8): без стрийминг целият отговор трябва да дойде в
+    # таймаута, а Критикът вече мери 114–140s — отговор над 120s се убиваше и почваше отначало.
+    request_timeout_seconds: int = 300
     model_max_retries: int = 3
     invalid_response_max_retries: int = 2
 
@@ -65,6 +78,18 @@ class Config:
     # (виж src/llm/roles.py) — нарочно НЕ е добавено в _REQUIRED_VARS, за да не се изисква
     # редактиране на .env само за да продължи да работи v3, докато v5 е изключен.
     model_judge: str = ""
+
+    # Опционални ускорявания (research-plan-36, Б3/Б4) — изключени по подразбиране, докато
+    # `python -m src.cli spike` не покаже, че бекендът ги поддържа. Виж llm/client.py.
+    no_thinking_roles: frozenset[str] = frozenset()
+    structured_output: str = "off"  # "off" | "json_schema"
+    # Предпазител за ролите без „мислене" (research-plan-38): нормалният отговор идва за
+    # 5–40 s, но веднъж на живо Критикът без мислене зацикли до пълния 300 s таймаут. По-къс
+    # таван → по-бърз преход към резервния модел. 0 = без отделен таван.
+    no_thinking_timeout_seconds: int = 90
+    # Стъпка [8] (research-plan-38): след финалната проверка агентът сам маха недоказаните
+    # твърдения с една лека редакция. FINAL_AUTOFIX=0 връща старото „само докладвай".
+    final_autofix: bool = True
 
 
 _REQUIRED_VARS = (
@@ -144,7 +169,7 @@ def load_config(env_path: Path | None = None) -> Config:
         model_critic=os.environ["MODEL_CRITIC"],
         model_consolidator=os.environ["MODEL_CONSOLIDATOR"],
         model_fallback=os.environ["MODEL_FALLBACK"],
-        request_timeout_seconds=_int_env("REQUEST_TIMEOUT_SECONDS", 120),
+        request_timeout_seconds=_int_env("REQUEST_TIMEOUT_SECONDS", 300),
         model_max_retries=_int_env("MODEL_MAX_RETRIES", 3),
         invalid_response_max_retries=_int_env("INVALID_RESPONSE_MAX_RETRIES", 2),
         temperature=_optional_float_env("TEMPERATURE"),
@@ -153,4 +178,10 @@ def load_config(env_path: Path | None = None) -> Config:
         pipeline_chain=(os.environ.get("PIPELINE_CHAIN", "v3").strip().lower() or "v3"),
         writer_candidates=_int_env("WRITER_CANDIDATES", 3),
         model_judge=os.environ.get("MODEL_JUDGE", "").strip(),
+        no_thinking_roles=frozenset(
+            role.strip().lower() for role in os.environ.get("NO_THINKING_ROLES", "").split(",") if role.strip()
+        ),
+        structured_output=(os.environ.get("STRUCTURED_OUTPUT", "off").strip().lower() or "off"),
+        no_thinking_timeout_seconds=_int_env("NO_THINKING_TIMEOUT_SECONDS", 90),
+        final_autofix=os.environ.get("FINAL_AUTOFIX", "1").strip() not in ("0", "off", "false", "no"),
     )

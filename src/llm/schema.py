@@ -72,10 +72,51 @@ class MediaSelectionItem(BaseModel):
     )
 
 
+class MediaExclusion(BaseModel):
+    """Снимка, която Media Picker изрично НЕ слага в поста (скрийншот от компютър, дубликат)."""
+
+    filename: str
+    reason: str = ""
+
+
+class PhotoKind(str, Enum):
+    """Какво е на една прикачена снимка — само `screen_capture` се изключва от поста."""
+
+    PHOTO = "photo"
+    GRAPHIC = "graphic"
+    SCREEN_CAPTURE = "screen_capture"
+
+
+class PhotoReviewSchema(BaseModel):
+    """
+    Отговорът на Media Picker за ЕДНА снимка (едно извикване на снимка, паралелно). Подредбата и
+    дубликатите се решават в кода (media_picker.py), не от модела.
+    """
+
+    kind: PhotoKind
+    description: str = Field(default="", description="какво показва, до 20 думи")
+    strength: int = Field(default=3, description="1–5: колко силна е като първа снимка на поста")
+    possible_minor: bool = False
+    topical_mismatch: bool | None = None
+    mismatch_reason: str | None = None
+
+    @field_validator("strength", mode="before")
+    @classmethod
+    def _clamp_strength(cls, value: object) -> int:
+        # Извън 1–5 не е повод за поправящ retry — подредбата е груба така или иначе.
+        try:
+            return min(5, max(1, int(value)))  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return 3
+
+
 class MediaSelectionSchema(BaseModel):
     """Изход на Media Picker — записва се в media.json."""
 
     selected: list[MediaSelectionItem] = Field(default_factory=list)
+    # Незадължително (подразбиране празно) — стар media.json и тестови дубли без полето пак
+    # парсват. От 2026-10-13 всички прикачени снимки влизат, освен изброените тук.
+    excluded: list[MediaExclusion] = Field(default_factory=list)
 
 
 class Verdict(str, Enum):
@@ -165,6 +206,11 @@ class RuleViolation(BaseModel):
 
     rule: str = Field(description="'gdpr' или 'forbidden'")
     detail: str
+    # Попълва се САМО от кода (critic.enforce_code_level_rules), никога от модела: GDPR находка
+    # за организация, която човекът сам е написал в брифа. Решение на потребителя 2026-10-09
+    # (research-plan-36, Г2): такова име остава в текста — находката стига до човека като
+    # бележка, но НЕ влиза в дневния ред на втория пост като „махни".
+    from_brief: bool = False
 
 
 class CritiqueSchema(BaseModel):

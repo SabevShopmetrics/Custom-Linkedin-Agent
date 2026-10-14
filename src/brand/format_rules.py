@@ -18,7 +18,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -243,6 +243,47 @@ def parse_format_rules(
         known_urls=tuple(known),
         sources=tuple(sources),
         unparsed=tuple(unparsed),
+    )
+
+
+def align_with_examples(rules: FormatRules, verbatim_examples: list[str]) -> FormatRules:
+    """
+    Разширява правилата така, че нито един ДОСЛОВЕН публикуван пост на клъстера да не ги
+    нарушава — решение на потребителя 2026-10-09 (research-plan-36, Г1).
+
+    Защо: при одита 4 от 5-те дословни поста бяха под тогавашния минимум от 130 думи,
+    правилото „3–6 емоджи" пасваше на 1 от 5, а белият списък махаше 🎤 💡 ✨ от реален пост.
+    Еталонните постове биха били „поправени" от собствения ни код. Посоката е само
+    разширяване, никога стесняване: правило, по-широко от корпуса в tone.md, остава.
+
+    Долната граница за думи се закръгля надолу до десетица (103 → 100) — ориентир, не
+    точна бройка. Без дословни примери правилата се връщат непроменени.
+    """
+    if not verbatim_examples:
+        return rules
+
+    emoji_counts = [len(extract_emoji(text)) for text in verbatim_examples]
+    example_emoji = {char for text in verbatim_examples for char in extract_emoji(text)}
+    word_counts = [count_words(text) for text in verbatim_examples]
+
+    allowed = rules.allowed_emoji
+    if allowed:  # празен списък значи „правилото не е зададено" — не го създаваме тук
+        allowed = frozenset(allowed | example_emoji)
+
+    emoji_min = rules.emoji_min if rules.emoji_min is None else min(rules.emoji_min, min(emoji_counts))
+    emoji_max = rules.emoji_max if rules.emoji_max is None else max(rules.emoji_max, max(emoji_counts))
+    floor = (min(word_counts) // 10) * 10
+    words_min = rules.words_min if rules.words_min is None else min(rules.words_min, floor)
+    words_max = rules.words_max if rules.words_max is None else max(rules.words_max, max(word_counts))
+
+    return replace(
+        rules,
+        allowed_emoji=allowed,
+        emoji_min=emoji_min,
+        emoji_max=emoji_max,
+        words_min=words_min,
+        words_max=words_max,
+        sources=rules.sources + (f"{len(verbatim_examples)} дословни поста в examples/good/",),
     )
 
 

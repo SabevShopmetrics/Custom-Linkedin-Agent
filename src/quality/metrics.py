@@ -184,6 +184,19 @@ def measure(text: str) -> TextMetrics:
     )
 
 
+def edit_ratio(proposed: str, published: str) -> float:
+    """
+    Каква част от текста човекът е променил преди публикуване, 0.0–1.0 (по думи).
+
+    research-plan-36, Г6: единствената мярка, която отговаря пряко на „публикуем ли е текстът
+    без поправки". Всички останали метрики тук са проксита; тази е самият резултат.
+    """
+    import difflib
+
+    matcher = difflib.SequenceMatcher(a=proposed.split(), b=published.split(), autojunk=False)
+    return round(1.0 - matcher.ratio(), 3)
+
+
 @dataclass(frozen=True)
 class ReferenceBand:
     """

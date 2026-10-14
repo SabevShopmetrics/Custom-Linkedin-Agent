@@ -85,14 +85,16 @@ from rich.text import Text
 
 from src.brand.loader import BrandKnowledge, audit_knowledge, load_brand_knowledge
 from src.config import Config, ConfigError, load_config
-from src.errors import AgentError
+from src.errors import AgentError, AuthenticationError
+from src.humanize import humanize_notes, status_label
 from src.llm.client import LLMClient
 from src.logging_utils import register_persistent_handler, unregister_persistent_handler
 from src.pipeline import modes, planner
 from src.pipeline.consolidator import PipelineResult
 from src.pipeline.preview import render_preview
-from src.pipeline.runner import FinalCheckUpdate, run_pipeline
+from src.pipeline.runner import FinalCheckUpdate, refresh_photos, run_pipeline, run_revision
 from src.pipeline.util import PHOTO_EXTENSIONS, file_uri, list_photos, read_text_or_none
+from src.quality.metrics import edit_ratio
 from src.terminal import force_utf8_io, sanitize_input
 
 POSTS_DIR = Path("posts")
@@ -106,34 +108,61 @@ CONTINUATION_PROMPT = "  "
 # еднозначно се разпознават като команда, не като текст за писане.
 _WIZARD_KEYWORDS = {"нов", "wizard"}
 
+# research-plan-36, В5: кратката помощ съдържа само нещата, които маркетологът реално ползва;
+# всичко останало е под „/help всички". Ревизия вече не изисква команда (виж
+# looks_like_revision), затова /revise не е в кратката помощ.
 HELP_TEXT = """\
-Пиши брифа на един ред и натисни Enter — агентът генерира поста. Нищо друго не пита:
-кого да спомене безопасно, чувствителен ли е постът, какъв тон да ползва — това си е
-негова работа, не твоя.
-Ред, завършващ с \\, продължава на следващия (за по-дълъг бриф).
-Снимка се прикачва по няколко начина — избери кой ти е по-удобен:
-  · провлачи файла direктно на промпта и Enter (без нищо отпред)
-  · "+" сам на реда (или /pick, /browse) — отваря диалог за избор на файлове с мишка
-  · @път вътре в самия бриф, /attach <път>, или просто я провлачи при /wizard
+Как се работи:
+  1. Опиши с няколко изречения какво се е случило (можеш да поставиш цял имейл) и натисни Enter.
+  2. Прочети предложението. За промяна просто напиши какво да се смени — напр. „по-кратко",
+     „добави благодарност на ВСУ", „махни втория абзац".
+  3. За нов пост напиши „нов: " и брифа (или само „нов").
 
-  нов               (или /wizard, /w) — като обикновен ред, но пита за снимки при нужда
+Снимки: провлачи файла тук и Enter, или напиши „+" и ги избери с мишката.
+
+  /чернова        показва първата чернова на последния пост
+  /again          пише последния пост изцяло наново
+  /publikuvano    запиши какво реално публикувахте (за да мерим качеството)
+  /help всички    всички команди
+  /exit           изход\
+"""
+
+HELP_TEXT_FULL = """\
+Всички команди:
+  нов: <бриф>       нов пост (само „нов" — пита за брифа и за снимки)
   /mode [режим]     дължина на следващия пост — Кадър/Фокус/Панорама (виж /mode без аргумент)
   +                 отваря диалог за избор на снимки с мишка (или /pick, /browse)
   /attach <път> …   прикачва снимка, папка със снимки или маска (*.jpg)
   /photos           показва прикаченото; /photos clear го изчиства
-  /revise <текст>   пренаписва последния пост с допълнителна инструкция
-  /again            пуска последния бриф наново (всички стъпки от нула)
-  /preview          отваря визуален изглед (текст + избрани снимки) в браузър
+  /revise <текст>   променя последния пост (същото като просто да напишеш молбата)
+  /again            пише последния пост изцяло наново (всички стъпки)
+  /чернова          първата чернова на последния пост (/draft)
+  /publikuvano      записва публикувания текст и показва колко е редактиран (/published)
+  /preview          отваря визуален изглед (текст + избрани снимки)
   /last             показва последния пост още веднъж
+  /подробно         показва/скрива техническите стъпки по време на писане (/verbose)
   /log [n]          последните n реда от run.log на последния пост (по подр. 30)
   /dir              папката на последния пост; /open я отваря
-  /check            проверява Open WebUI и всеки конфигуриран модел
+  /ключ             въвежда нов API ключ (/key)
+  /check            проверява връзката със сървъра и всеки модел
   /knowledge        какво липсва в knowledge/
   /reload           препрочита knowledge/ и .env
   /clear            изчиства екрана
-  /help             това
-  /exit             изход (или Ctrl+D)\
+  /help             кратка помощ
+  /exit             изход\
 """
+
+# Ревизия без команда (research-plan-36, В3). Ред, който започва с повелителна форма за
+# редакция или с „по-", след като вече има пост в сесията, се третира като промяна на него,
+# а не като нов бриф. Нарочно тесен списък с ПОВЕЛИТЕЛНИ форми, следвани от интервал или край:
+# „Добавихме нов член..." (минало време) не съвпада с „добави".
+_REVISION_CUES = (
+    "добави", "махни", "премахни", "смени", "промени", "съкрати", "скъси", "удължи", "направи",
+    "пренапиши", "поправи", "оправи", "сложи", "замени", "преформулирай", "напиши", "без",
+    "остави", "върни", "използвай", "ползвай", "спомени", "благодари", "започни", "завърши",
+    "раздели", "обедини", "преведи", "изтрий", "махнете", "добавете", "сменете", "направете",
+)
+_REVISION_MAX_WORDS = 30
 
 
 # --------------------------------------------------------------------------- цветове
@@ -271,15 +300,21 @@ def _expand_one(raw: str) -> list[Path]:
     )
 
 
-_QUOTED_OR_BARE_TOKEN = re.compile(r'"([^"]+)"|(\S+)')
+# Провлачен файл в PowerShell пристига като `& 'C:\път с интервали\a.png'` — операторът за
+# извикване `&` и ЕДИНИЧНИ кавички; cmd слага двойни. Реален случай (2026-10-13): снимка,
+# провлачена в PowerShell, не се разпозна и пътят ѝ замина към модела като текст на брифа.
+_QUOTED_OR_BARE_TOKEN = re.compile(r'"([^"]+)"|\'([^\']+)\'|(\S+)')
+_POWERSHELL_CALL_OPERATOR = "&"
 
 
 def split_path_args(text: str) -> list[str]:
     """
-    Разбива една реплика на отделни пътища — поддържа "път с интервали" в кавички.
+    Разбива една реплика на отделни пътища — поддържа "път с интервали" в двойни или
+    единични кавички и пропуска `&`, който PowerShell слага пред провлачен файл.
     Споделено между /attach и /wizard (стъпката за снимки), за да приемат едно и също.
     """
-    return [quoted or bare for quoted, bare in _QUOTED_OR_BARE_TOKEN.findall(text)]
+    tokens = [double or single or bare for double, single, bare in _QUOTED_OR_BARE_TOKEN.findall(text)]
+    return [token for token in tokens if token != _POWERSHELL_CALL_OPERATOR]
 
 
 def resolve_attachments(args: Iterable[str]) -> tuple[list[Path], list[str]]:
@@ -319,6 +354,60 @@ def bare_photo_paths(line: str) -> list[Path] | None:
     return found or None
 
 
+def unsupported_file_paths(line: str) -> list[Path] | None:
+    """
+    Ако ЦЕЛИЯТ ред са пътища до съществуващи файлове, но поне един не е поддържана снимка
+    (.HEIC от iPhone, .gif, .pdf...) — връща тези файлове. Иначе None.
+
+    research-plan-36, А9: досега такъв ред минаваше за бриф и пускаше цял конвейер върху
+    текста „C:\\Users\\...\\IMG_0042.HEIC".
+    """
+    tokens = split_path_args(line)
+    if not tokens:
+        return None
+    unsupported: list[Path] = []
+    for token in tokens:
+        candidate = Path(token.strip().strip('"').strip("'")).expanduser()
+        if not candidate.is_file():
+            return None
+        if candidate.suffix.lower() not in PHOTO_EXTENSIONS:
+            unsupported.append(candidate)
+    return unsupported or None
+
+
+def looks_like_revision(line: str) -> bool:
+    """
+    research-plan-36, В3: кратък ред, започващ с повелителна форма за редакция („по-кратко",
+    „добави ...", „махни ...") е молба за промяна на последния пост, не нов бриф. Викащият
+    проверява дали изобщо има пост в сесията.
+    """
+    words = line.strip().split()
+    if not words or len(words) > _REVISION_MAX_WORDS:
+        return False
+    first = words[0].lower().strip(",.:;!—-")
+    return first.startswith("по-") or first in _REVISION_CUES
+
+
+def _stdin_has_pending_input() -> bool:
+    """
+    Има ли още символи в буфера на конзолата веднага след прочетен ред — тоест човекът е
+    поставил текст на няколко реда наведнъж (research-plan-36, А6). Без това всеки ред от
+    поставен имейл ставаше отделен пост — реален случай: три пускания от три абзаца.
+    """
+    time.sleep(0.03)  # поставеният текст пристига почти мигновено; ръчно писане — не
+    try:
+        if sys.platform.startswith("win"):
+            import msvcrt
+
+            return bool(msvcrt.kbhit())
+        import select
+
+        ready, _, _ = select.select([sys.stdin], [], [], 0)
+        return bool(ready)
+    except Exception:  # без конзола (пренасочен вход, IDE) — държим се като преди
+        return False
+
+
 def _default_file_picker() -> tuple[str, ...] | None:
     """
     Реалният системен диалог за избор на файлове (tkinter) — подразбиране за
@@ -348,11 +437,28 @@ def _default_file_picker() -> tuple[str, ...] | None:
         root.destroy()
 
 
+# Провлачен файл вътре в брифа, без @: по желание `&` (PowerShell), после път в двойни,
+# единични или никакви кавички.
+_DRAGGED_PATH_TOKEN = re.compile(r'(?:&\s*)?(?:"([^"]+)"|\'([^\']+)\'|(\S+))')
+
+
+def _dragged_photo(raw: str) -> Path | None:
+    """
+    Пълен път до съществуваща снимка — следа от провлачване, не от писане: никой не пише
+    `C:\\Users\\...\\a.png` в бриф на ръка. Относително име („снимка.jpg") НЕ се приема —
+    иначе дума от брифа, случайно съвпаднала с файл в текущата папка, би изчезнала тихо.
+    """
+    candidate = Path(raw).expanduser()
+    if candidate.is_absolute() and candidate.is_file() and candidate.suffix.lower() in PHOTO_EXTENSIONS:
+        return candidate
+    return None
+
+
 def extract_inline_attachments(text: str) -> tuple[str, list[Path], list[str]]:
     """
-    Изважда `@път` от текста на брифа. Токен, който НЕ сочи към съществуваща снимка,
-    остава в текста непокътнат — @споменаване в бриф е нормален български текст и не
-    бива да се яде тихо.
+    Изважда `@път` и провлачени пълни пътища до снимки от текста на брифа. @токен, който
+    НЕ сочи към съществуваща снимка, остава в текста непокътнат — @споменаване в бриф е
+    нормален български текст и не бива да се яде тихо.
     """
     found: list[Path] = []
     unresolved: list[str] = []
@@ -366,7 +472,15 @@ def extract_inline_attachments(text: str) -> tuple[str, list[Path], list[str]]:
         unresolved.append(raw)
         return match.group(0)
 
+    def replace_dragged(match: re.Match[str]) -> str:
+        photo = _dragged_photo(match.group(1) or match.group(2) or match.group(3))
+        if photo is None:
+            return match.group(0)
+        found.append(photo)
+        return ""
+
     cleaned = _ATTACHMENT_TOKEN.sub(replace, text)
+    cleaned = _DRAGGED_PATH_TOKEN.sub(replace_dragged, cleaned)
     return re.sub(r"[ \t]{2,}", " ", cleaned).strip(), found, unresolved
 
 
@@ -413,6 +527,21 @@ _STEP_TAG_RE = re.compile(r"^(\[[^\]]+\](?:/\[[^\]]+\])?)\s*")
 # видима отсечка от гледна точка на човек пред терминала, затова е в списъка.
 _STEP_ORDER = ["[1]", "[2]/[3]", "[4]", "[5]", "[6]", "[6б]", "[7]"]
 
+# research-plan-36, В1: какво вижда маркетологът вместо „[4] Критик върху Post I..." и
+# „присъда: needs_revision". Технически изглед остава с /подробно. None → стъпката не се
+# показва (фоновата проверка [7] съобщава сама, когато приключи).
+_HUMAN_STAGES = {
+    "[1]": "Чета брифа…",
+    "[1.5]": "Чета брифа…",
+    "[2]/[3]": "Пиша чернова…",
+    "[4]": "Проверявам факти, тон и правила…",
+    "[5]": "Подобрявам текста…",
+    "[6]": "Подобрявам текста…",
+    "[6б]": "Последни поправки…",
+    "[Р]": "Редактирам поста…",
+    "[7]": None,
+}
+
 
 class ProgressHandler(logging.Handler):
     """
@@ -423,11 +552,18 @@ class ProgressHandler(logging.Handler):
     въпроси), виси отдолу с отстъп, докато не тръгне следваща стъпка.
     """
 
-    def __init__(self, emit_line: Callable[[str], None], ink: Ink) -> None:
+    def __init__(self, emit_line: Callable[[str], None], ink: Ink, *, verbose: bool = True) -> None:
         super().__init__(level=logging.INFO)
         self._emit_line = emit_line
         self._ink = ink
+        # verbose=False (подразбиране в Repl от research-plan-36, В1): само кратки човешки етапи,
+        # без детайли под тях. Класът сам по себе си остава с True — технически изглед.
+        self.verbose = verbose
         self._current_tag: str | None = None
+        self._last_stage: str | None = None
+        # Етап, който REPL вече е показал сам (напр. „Чета брифа…" преди проверката за тънък
+        # бриф) — следващото му появяване от лога се пропуска веднъж, за да не излиза два пъти.
+        self.already_shown: str | None = None
         # Задава се отвън, само докато траят на екран прогрес-бар (виж _run_with_spinner) —
         # извиква се веднъж на всяка НОВА стъпка, с (таг, пълно съобщение). None извън
         # генериране — handler-ът си стои закачен цяла сесия, барът съществува само за
@@ -436,11 +572,34 @@ class ProgressHandler(logging.Handler):
 
     def emit(self, record: logging.LogRecord) -> None:
         message = record.getMessage()
+        if message.startswith("==="):
+            # Ново пускане (или ревизия) — етапите се показват отначало, дори да съвпадат с
+            # последните от предишното пускане.
+            self._current_tag = None
+            self._last_stage = None
         if message.startswith(_SUPPRESSED_LOG_PREFIXES):
             return
 
         match = _STEP_TAG_RE.match(message)
         tag = match.group(1) if match else None
+
+        if not self.verbose:
+            if not tag or tag == self._current_tag:
+                return
+            self._current_tag = tag
+            stage = _HUMAN_STAGES.get(tag)
+            if self.on_step:
+                # Скрита стъпка ([7]) или непознат таг — лентата пази последния човешки етап,
+                # вместо да покаже вътрешното име на стъпката.
+                self.on_step(tag, stage or self._last_stage or "Работя…")
+            if stage and stage == self.already_shown:
+                self.already_shown = None
+                self._last_stage = stage
+                return
+            if stage and stage != self._last_stage:
+                self._last_stage = stage
+                self._emit_line(self._ink.dim(f"  {stage}"))
+            return
 
         if tag and tag != self._current_tag:
             self._current_tag = tag
@@ -469,6 +628,7 @@ class SessionState:
     brief: str = ""
     revisions: int = 0
     mode: str = modes.DEFAULT_MODE
+    verbose: bool = False  # research-plan-36, В1 — технически изглед само с /подробно
 
 
 # --------------------------------------------------------------------------- REPL
@@ -493,9 +653,14 @@ class Repl:
         clipboard_fn: Callable[[str], bool] | None = None,
         file_picker_fn: Callable[[], tuple[str, ...] | None] = _default_file_picker,
         open_preview_fn: Callable[[Path], None] | None = None,
-        env_path: Path = ENV_PATH,
-        env_example_path: Path = ENV_EXAMPLE_PATH,
+        env_path: Path | None = None,
+        env_example_path: Path | None = None,
         today: date | None = None,
+        revision_fn: Callable[..., PipelineResult] = run_revision,
+        photo_refresh_fn: Callable[..., PipelineResult] = refresh_photos,
+        pending_input_fn: Callable[[], bool] | None = None,
+        secret_input_fn: Callable[[str], str] | None = None,
+        verbose: bool | None = None,
     ) -> None:
         self.posts_dir = posts_dir
         self.out = out or (lambda line: print(line))
@@ -508,13 +673,31 @@ class Repl:
         self.clipboard_fn = clipboard_fn or copy_to_clipboard
         self.file_picker_fn = file_picker_fn
         self.open_preview_fn = open_preview_fn or _open_in_file_manager
-        self.env_path = env_path
-        self.env_example_path = env_example_path
+        # Резолюция при създаване, не при дефиниция на функцията — тестовете подменят
+        # модулните ENV_PATH/ENV_EXAMPLE_PATH, за да не пишат истински .env в репото.
+        self.env_path = env_path or ENV_PATH
+        self.env_example_path = env_example_path or ENV_EXAMPLE_PATH
         self.today = today
+        self.revision_fn = revision_fn
+        self.photo_refresh_fn = photo_refresh_fn
+        # Откриване на поставен текст само при истинска конзола: тестовете (и всеки друг
+        # инжектиран input_fn) получават „няма чакащ вход", тоест старото поведение ред по ред.
+        if pending_input_fn is None:
+            pending_input_fn = _stdin_has_pending_input if input_fn is input else (lambda: False)
+        self.pending_input_fn = pending_input_fn
+        if secret_input_fn is None:
+            import getpass
+
+            secret_input_fn = getpass.getpass if input_fn is input else input_fn
+        self.secret_input_fn = secret_input_fn
 
         self.config: Config | None = None
         self.knowledge: BrandKnowledge | None = None
         self.state = SessionState()
+        if verbose is None:
+            verbose = os.environ.get("AGENT_VERBOSE", "").strip().lower() in {"1", "true", "да", "yes"}
+        self.state.verbose = verbose
+        self._cancel = threading.Event()
         self._running = True
         self._progress_handler: ProgressHandler | None = None
 
@@ -531,36 +714,68 @@ class Repl:
         try:
             self.config = self.config_loader()
         except ConfigError as exc:
-            self.out(self.ink.err(f"Грешка в конфигурацията: {exc}"))
-            return 1
+            # research-plan-36, А5: празен ключ в съществуващ .env беше задънена улица —
+            # настройката не се предлагаше повече и единственият изход беше ръчна редакция.
+            if "OPENWEBUI_API_KEY" in str(exc) and self.env_path.exists():
+                self.out(self.ink.warn("Липсва API ключ."))
+                if self._ask_for_api_key():
+                    try:
+                        self.config = self.config_loader()
+                    except ConfigError as retry_exc:
+                        self.out(self.ink.err(f"Грешка в настройките: {retry_exc}"))
+                        return 1
+                else:
+                    return 1
+            else:
+                self.out(self.ink.err(f"Грешка в настройките: {exc}"))
+                return 1
 
-        self.knowledge = self.knowledge_loader()
+        try:
+            self.knowledge = self.knowledge_loader()
+        except Exception as exc:  # счупен YAML и т.н. — без traceback пред маркетолога
+            self.out(
+                self.ink.err(
+                    f"Не успях да прочета знанията за клъстера (папка knowledge/): {exc}. "
+                    f"Покажете това съобщение на колегата, който поддържа агента."
+                )
+            )
+            return 1
         self._banner()
 
         # ProgressHandler препраща логовете на конвейера към конзолата в реално време,
         # докато е закачен — виж logging_utils.register_persistent_handler.
-        handler = ProgressHandler(self.out, self.ink)
+        handler = ProgressHandler(self.out, self.ink, verbose=self.state.verbose)
         self._progress_handler = handler
         register_persistent_handler(handler)
         try:
             while self._running:
                 try:
                     line = self._read_input()
-                except (EOFError, KeyboardInterrupt):
+                except EOFError:
                     self.out("")
                     break
+                except KeyboardInterrupt:
+                    # research-plan-36, А7: много хора натискат Ctrl+C, за да копират — на празен
+                    # промпт това вече не затваря цялата сесия.
+                    self.out(self.ink.dim("\n  (За изход напишете /exit.)"))
+                    continue
                 if line is None or not line.strip():
                     continue
                 try:
                     self.handle(line.strip())
                 except KeyboardInterrupt:
-                    # Ctrl+C по време на конвейер прекъсва само текущия пост. Всичко
-                    # написано дотук остава на диска — следващ /again продължава оттам.
-                    self.out(self.ink.warn("\n  ⚠ Прекъснато. Написаните файлове остават на диска."))
+                    # Ctrl+C извън генериране (напр. по време на въпрос) — само прекъсва текущото.
+                    self.out(self.ink.warn("\n  ⚠ Прекъснато. Написаното дотук остава в папката на поста."))
                 except Exception as exc:  # нарочно широко — един счупен пост не бива да
                     # сваля цялата сесия. AgentError вече е обработена по-надолу с човешко
                     # съобщение; тук остават само неочакваните (счупен път, права, бъг).
-                    self.out(self.ink.err(f"  ✗ Неочаквана грешка: {type(exc).__name__}: {exc}"))
+                    self.out(
+                        self.ink.err(
+                            "  ✗ Нещо се обърка неочаквано. Опитайте отново; ако се повтаря, покажете "
+                            "това на колегата, който поддържа агента:"
+                        )
+                    )
+                    self.out(self.ink.dim(f"    {type(exc).__name__}: {exc}"))
         finally:
             unregister_persistent_handler(handler)
 
@@ -568,12 +783,21 @@ class Repl:
         return 0
 
     def _read_input(self) -> str | None:
-        """Чете един логически ред; ред, завършващ с `\\`, продължава на следващия."""
+        """
+        Чете един логически ред; ред, завършващ с `\\`, продължава на следващия.
+
+        research-plan-36, А6: поставен текст на няколко реда (имейл, покана) се събира в ЕДИН
+        бриф — редовете, които вече чакат в буфера на конзолата веднага след първия, се
+        прочитат заедно с него. Ръчно написан ред с Enter работи както преди.
+        """
         line = self.input_fn(self.ink.accent(PROMPT))
         parts = [line]
-        while parts[-1].rstrip().endswith("\\"):
-            parts[-1] = parts[-1].rstrip()[:-1].rstrip()
-            parts.append(self.input_fn(self.ink.dim(CONTINUATION_PROMPT)))
+        while parts[-1].rstrip().endswith("\\") or self.pending_input_fn():
+            if parts[-1].rstrip().endswith("\\"):
+                parts[-1] = parts[-1].rstrip()[:-1].rstrip()
+                parts.append(self.input_fn(self.ink.dim(CONTINUATION_PROMPT)))
+            else:
+                parts.append(self.input_fn(""))
         return sanitize_input("\n".join(part for part in parts).strip())
 
     def _offer_env_setup(self) -> None:
@@ -583,16 +807,59 @@ class Repl:
         Останалите настройки (модели, URL) остават каквито са в .env.example; който иска
         друг модел, си остава свободен да редактира .env ръчно после.
         """
-        answer = self.input_fn(self.ink.accent("Няма .env — да го създам ли сега? (Enter = да, 'не' за отказ) › "))
+        answer = self.input_fn(
+            self.ink.accent("Първо стартиране — да настроя ли връзката сега? (Enter = да, 'не' за отказ) › ")
+        )
         if answer.strip().lower() in {"не", "n", "no"}:
             self.out(self.ink.dim("  Пропуснато — създай .env ръчно от .env.example, преди да продължиш."))
             return
+        self._ask_for_api_key()
 
-        api_key = self.input_fn(self.ink.accent("  OPENWEBUI_API_KEY › ")).strip()
-        template = self.env_example_path.read_text(encoding="utf-8")
-        filled = re.sub(r"^OPENWEBUI_API_KEY=.*$", f"OPENWEBUI_API_KEY={api_key}", template, count=1, flags=re.MULTILINE)
+    def _ask_for_api_key(self) -> bool:
+        """
+        Пита за API ключа (скрит при писане), записва го в .env и връща дали е записан.
+
+        research-plan-36, А5: празен отговор НЕ записва файл — преди празният ключ се
+        записваше, следващото стартиране виждаше, че .env съществува, и не питаше повече.
+        Ключът не се проверява тук с мрежово извикване (бавно, при първо стартиране); грешен
+        ключ вече спира веднага с ясно съобщение при първия пост (AuthenticationError).
+        """
+        self.out(
+            self.ink.dim(
+                "  API ключът е в Open WebUI (chat.velocity.online): иконката на профила → Settings → "
+                "Account → API Keys. Ако нямате достъп, поискайте ключ от колегата, който поддържа агента."
+            )
+        )
+        api_key = self.secret_input_fn(self.ink.accent("  Поставете ключа (не се вижда, докато пишете) › ")).strip()
+        if not api_key:
+            self.out(self.ink.warn("  Не е въведен ключ — нищо не е записано. Стартирайте пак, когато го имате."))
+            return False
+
+        if self.env_path.exists():
+            template = self.env_path.read_text(encoding="utf-8")
+        elif self.env_example_path.exists():
+            template = self.env_example_path.read_text(encoding="utf-8")
+        else:
+            template = "OPENWEBUI_API_KEY=\n"
+        if re.search(r"^OPENWEBUI_API_KEY=.*$", template, flags=re.MULTILINE):
+            filled = re.sub(
+                r"^OPENWEBUI_API_KEY=.*$", lambda _m: f"OPENWEBUI_API_KEY={api_key}", template, count=1, flags=re.MULTILINE
+            )
+        else:
+            filled = template.rstrip("\n") + f"\nOPENWEBUI_API_KEY={api_key}\n"
         self.env_path.write_text(filled, encoding="utf-8")
-        self.out(self.ink.ok(f"  ✓ Записан {self.env_path} — редактирайте го за друг модел/URL при нужда."))
+        # load_dotenv(override=False) не презаписва вече заредена стойност — затова и тук.
+        os.environ["OPENWEBUI_API_KEY"] = api_key
+        self.out(self.ink.ok("  ✓ Ключът е записан."))
+        return True
+
+    def cmd_key(self, _argument: str = "") -> None:
+        """/ключ — нов API ключ без ръчна редакция на .env (research-plan-36, А5)."""
+        if self._ask_for_api_key():
+            try:
+                self.config = self.config_loader()
+            except ConfigError as exc:
+                self.out(self.ink.err(f"Грешка в настройките: {exc}"))
 
     def _banner(self) -> None:
         """
@@ -608,20 +875,18 @@ class Repl:
         if self.knowledge.facts:
             org_name = self.knowledge.facts.get("organization", {}).get("name_bg") or org_name
 
+        # research-plan-36, В5: без ID на модела и без командите за напреднали — три неща,
+        # които човек трябва да знае, за да започне.
         body = "\n".join(
             [
-                f"Заредено: {len(self.knowledge.members)} членове · "
-                f"{len(self.knowledge.good_examples)} еталонни поста · "
-                f"писател: {self.config.model_writer}",
+                f"Познавам {len(self.knowledge.members)} членове на клъстера и "
+                f"{len(self.knowledge.good_examples)} ваши публикувани поста.",
                 "",
-                "Напиши с няколко думи какво се е случило — Enter генерира поста.",
-                "📎 Снимки: провлачи файл тук, или напиши '+' и избери с мишка.",
+                "✍  Опишете какво се е случило (може и поставен имейл) и натиснете Enter.",
+                "📎 Снимки: провлачете файл тук или напишете „+“.",
+                "🔁 След като видите поста, просто напишете какво да се промени.",
                 "",
-                "Най-важни команди:",
-                f"  /mode      колко дълъг да е постът (сега: {modes.get_mode(self.state.mode).label})",
-                "  /revise    променя последния пост по твоя инструкция",
-                "  /again     генерира последния бриф наново",
-                "  /help      всички команди",
+                "/help — помощ   ·   /exit — изход",
             ]
         )
         self.out(self.ink.panel(body, title=f"LinkedIn агент — {org_name}"))
@@ -637,6 +902,13 @@ class Repl:
             self.cmd_wizard("")
             return
 
+        # „нов: <бриф>" — изрично нов пост, дори текстът да прилича на молба за промяна. Само с
+        # двоеточие: „Нов член се присъедини..." е истински бриф и думата „Нов" остава в него.
+        keyword_match = re.match(r"^(нов|нов пост)\s*:\s*(.+)$", line.strip(), flags=re.IGNORECASE | re.DOTALL)
+        if keyword_match:
+            self._new_post(keyword_match.group(2).strip())
+            return
+
         # "+" сам на реда отваря системния диалог за избор на файлове — аналог на "+"
         # бутона за прикачване в Claude Code, за човек, който предпочита мишка пред
         # ръчно писане/влачене на път. Виж cmd_pick_photos.
@@ -649,10 +921,23 @@ class Repl:
             # @ отпред — най-интуитивното движение. Виж докстринга на bare_photo_paths.
             photos = bare_photo_paths(line)
             if photos is not None:
-                self.state.attachments.extend(photos)
+                self._photos_added(photos)
+                return
+            unsupported = unsupported_file_paths(line)
+            if unsupported is not None:
+                names = ", ".join(path.name for path in unsupported)
                 self.out(
-                    self.ink.ok(f"  + {len(photos)} снимка(и); общо прикачени: {len(self.state.attachments)}")
+                    self.ink.err(
+                        f"  ✗ {names} — не е снимка във формат, който агентът чете (JPG, PNG или WEBP). "
+                        f"Снимка от iPhone (.HEIC): отворете я и я запазете/изпратете като JPG."
+                    )
                 )
+                return
+            # research-plan-36, В3: след готов пост кратка повелителна молба („по-кратко",
+            # „добави ...") е ревизия — без да се помни командата /revise.
+            if self._has_finished_post() and looks_like_revision(line):
+                self.out(self.ink.dim("  (Приемам го като промяна на последния пост — за нов пост напишете „нов: …“.)"))
+                self.cmd_revise(line)
                 return
             self._new_post(line)
             return
@@ -673,6 +958,17 @@ class Repl:
             "revise": self.cmd_revise,
             "again": self.cmd_again,
             "regen": self.cmd_again,
+            "чернова": self.cmd_draft,
+            "draft": self.cmd_draft,
+            "publikuvano": self.cmd_published,
+            "публикувано": self.cmd_published,
+            "published": self.cmd_published,
+            "подробно": self.cmd_verbose,
+            "verbose": self.cmd_verbose,
+            "ключ": self.cmd_key,
+            "key": self.cmd_key,
+            "помощ": self.cmd_help,
+            "изход": self.cmd_exit,
             "last": self.cmd_last,
             "log": self.cmd_log,
             "dir": self.cmd_dir,
@@ -691,8 +987,102 @@ class Repl:
             return
         command(argument)
 
-    def cmd_help(self, _argument: str = "") -> None:
-        self.out(HELP_TEXT)
+    def cmd_help(self, argument: str = "") -> None:
+        if argument.strip().lower() in {"всички", "all", "пълна"}:
+            self.out(HELP_TEXT_FULL)
+        else:
+            self.out(HELP_TEXT)
+
+    def cmd_verbose(self, _argument: str = "") -> None:
+        """/подробно — превключва техническия изглед на стъпките (research-plan-36, В1)."""
+        self.state.verbose = not self.state.verbose
+        if self._progress_handler is not None:
+            self._progress_handler.verbose = self.state.verbose
+        self.out(
+            self.ink.dim(
+                "  Технически изглед: включен (стъпки, находки, модели)."
+                if self.state.verbose
+                else "  Технически изглед: изключен."
+            )
+        )
+
+    def cmd_draft(self, _argument: str = "") -> None:
+        """/чернова — първата чернова (post_i.md), напр. когато финалът е изгубил детайл (Г3)."""
+        if self.state.post_dir is None:
+            self.out(self.ink.dim("  Още няма пост в тази сесия."))
+            return
+        text = read_text_or_none(self.state.post_dir / "post_i.md")
+        if not text:
+            self.out(self.ink.dim("  Няма запазена чернова за последния пост."))
+            return
+        self.out("")
+        self.out(self.ink.panel(text.strip(), title="Първа чернова (не е окончателният текст)", border_style="grey62"))
+
+    def cmd_published(self, argument: str = "") -> None:
+        """
+        /publikuvano — Г6 (research-plan-36): човекът поставя текста, който реално е публикувал;
+        записва се в output/published.md и се показва колко е редактиран. Това е единствената
+        мярка, която отговаря директно на въпроса „публикуем ли е текстът без поправки" —
+        bench я чете от published.md.
+        """
+        if self.state.post_dir is None or not self._has_finished_post():
+            self.out(self.ink.dim("  Още няма готов пост в тази сесия."))
+            return
+        text = argument.strip()
+        if not text:
+            text = self.input_fn(
+                self.ink.accent("  Поставете публикувания текст (Enter = същият като предложението) › ")
+            ).strip()
+            while self.pending_input_fn():
+                text += "\n" + self.input_fn("")
+        proposed = read_text_or_none(self.state.post_dir / "output" / "post.md") or ""
+        published = text.strip() or proposed.strip()
+        (self.state.post_dir / "output" / "published.md").write_text(published + "\n", encoding="utf-8")
+        ratio = edit_ratio(proposed, published)
+        if ratio == 0:
+            self.out(self.ink.ok("  ✓ Записано: публикуван без промени."))
+        else:
+            self.out(self.ink.ok(f"  ✓ Записано: около {round(ratio * 100)}% от текста е променен преди публикуване."))
+
+    def _has_finished_post(self) -> bool:
+        return self.state.post_dir is not None and (self.state.post_dir / "output" / "post.md").exists()
+
+    def _photos_added(self, photos: list[Path]) -> None:
+        """
+        Общ край за провлачени / избрани с мишка / прикачени снимки. research-plan-36, В4: ако
+        вече има готов пост, пита дали снимките са за него — досега те тихо чакаха следващия пост.
+        """
+        if not photos:
+            return
+        if self._has_finished_post() and self.config is not None:
+            answer = self.input_fn(
+                self.ink.accent(
+                    f"  {len(photos)} снимка(и). Да ги добавя ли към последния пост? "
+                    f"(Enter = да, 'не' = пазя ги за следващия пост) › "
+                )
+            ).strip().lower()
+            if answer not in {"не", "n", "no"}:
+                self._add_photos_to_last_post(photos)
+                return
+        self.state.attachments.extend(photos)
+        self.out(self.ink.ok(f"  + {len(photos)} снимка(и) за следващия пост; общо: {len(self.state.attachments)}"))
+
+    def _add_photos_to_last_post(self, photos: list[Path]) -> None:
+        assert self.state.post_dir is not None and self.config is not None
+        copied = copy_attachments(photos, self.state.post_dir / "photos")
+        self.out(self.ink.dim(f"  Добавени {len(copied)} снимка(и). Избирам снимките наново…"))
+        client = self.client_factory(self.config)
+        try:
+            result = self.photo_refresh_fn(self.state.post_dir, client, knowledge=self.knowledge)
+        except AgentError as exc:
+            self.out(self.ink.err(f"  ✗ {exc.human_message}"))
+            return
+        selected = sorted((self.state.post_dir / "output" / "selected").glob("*"))
+        names = ", ".join(path.name for path in selected) or "нито една"
+        self.out(self.ink.ok(f"  ✓ Избрани снимки: {names}"))
+        for note in humanize_notes(result.warnings + [n for n in result.open_notes if "Media Picker" in n]):
+            self.out(self.ink.warn(f"  ⚠ {note}"))
+        self._refresh_preview(self.state.post_dir, announce=True)
 
     def cmd_exit(self, _argument: str = "") -> None:
         self._running = False
@@ -726,9 +1116,7 @@ class Repl:
             self.out(self.ink.err("Употреба: /attach <път до снимка, папка или маска>"))
             return
         found, unresolved = resolve_attachments(split_path_args(argument))
-        self.state.attachments.extend(found)
-        if found:
-            self.out(self.ink.ok(f"  + {len(found)} снимка(и); общо прикачени: {len(self.state.attachments)}"))
+        self._photos_added(found)
         for item in unresolved:
             self.out(self.ink.err(f"  ✗ не намерена снимка: {item}"))
 
@@ -753,9 +1141,7 @@ class Repl:
             return
 
         found, unresolved = resolve_attachments(paths)
-        self.state.attachments.extend(found)
-        if found:
-            self.out(self.ink.ok(f"  + {len(found)} снимка(и); общо прикачени: {len(self.state.attachments)}"))
+        self._photos_added(found)
         for item in unresolved:
             self.out(self.ink.err(f"  ✗ не разпознат файл: {item}"))
 
@@ -887,9 +1273,18 @@ class Repl:
         revision_mode = modes.resolve_mode_for_revision(self.state.mode, argument)
         if revision_mode != self.state.mode:
             label = modes.get_mode(revision_mode).label
-            self.out(self.ink.dim(f"  ({label} само за тази ревизия — sticky режимът остава непроменен)"))
+            self.out(self.ink.dim(f"  ({label} само за тази промяна)"))
 
-        self._generate(self.state.post_dir, force=True, mode_override=revision_mode)
+        # research-plan-36, Б2: лека ревизия — Писателят редактира готовия пост с едно
+        # извикване (вместо пълното пускане отначало). Молбата остава записана в briefing.md
+        # по-горе, така че /again по-късно я взима предвид. runner.run_revision сам пада към
+        # пълното пускане, когато лекият път няма смисъл (няма готов пост, недостатъчен бриф).
+        self._generate(
+            self.state.post_dir,
+            force=True,
+            mode_override=revision_mode,
+            revision_instruction=argument.strip(),
+        )
 
     # ------------------------------------------------------------------ генериране
 
@@ -1001,7 +1396,9 @@ class Repl:
         self.state.brief = brief
         self.state.revisions = 0
 
-        self.out(self.ink.dim(f"  {post_dir}" + (f" · {len(copied)} снимка(и)" if copied else " · без снимки")))
+        self.out(self.ink.dim("  " + (f"{len(copied)} снимка(и) · " if copied else "без снимки · ") + "Чета брифа…"))
+        if self._progress_handler is not None:
+            self._progress_handler.already_shown = "Чета брифа…"
 
         brief, enriched = self._thin_brief_precheck(post_dir, brief)
         if enriched:
@@ -1045,7 +1442,7 @@ class Repl:
 
         answer = self.input_fn(
             self.ink.dim(
-                "  Планерът засече тънък бриф — има ли още детайл за добавяне "
+                "  Брифът е доста кратък — има ли още нещо конкретно за добавяне "
                 "(число, име, резултат)? (Enter = продължи както е) › "
             )
         ).strip()
@@ -1074,6 +1471,11 @@ class Repl:
         на rich.progress.Progress). Затова `self.out` временно се пренасочва към
         `progress.console.print`, вместо вградения `print()`, който би счупил визуално
         живата рамка на бара.
+
+        Ctrl+C (research-plan-36, А7): първото натискане вдига `self._cancel` — конвейерът спира
+        на следващата граница между стъпки (runner._check_cancel) и тук се изчаква това да
+        стане, за да не продължи фоновата нишка да вика модели и да печата върху следващия
+        промпт. Второ натискане спира чакането веднага.
         """
         if not self.ink.enabled:
             # NO_COLOR/не-tty/тестове — прогрес-бар без цвят е безсмислен шум, просто изчакай.
@@ -1094,12 +1496,11 @@ class Repl:
             SpinnerColumn(style="cyan3"),
             TextColumn("[bold]{task.description}"),
             BarColumn(bar_width=20, complete_style="cyan3", finished_style="green3"),
-            TextColumn("{task.completed}/{task.total}"),
             TimeElapsedColumn(),
             console=_panel_console(),
             transient=True,  # барът изчезва при край — редовете, вече отпечатани, остават
         )
-        task_id = progress.add_task("Стартиране...", total=len(_STEP_ORDER))
+        task_id = progress.add_task("Започвам…", total=len(_STEP_ORDER))
 
         def on_step(tag: str, message: str) -> None:
             if tag in _STEP_ORDER:
@@ -1115,7 +1516,13 @@ class Repl:
                 handler.on_step = on_step
             try:
                 while thread.is_alive():
-                    thread.join(timeout=0.2)
+                    try:
+                        thread.join(timeout=0.2)
+                    except KeyboardInterrupt:
+                        if self._cancel.is_set():
+                            raise  # второ Ctrl+C — не чакаме повече
+                        self._cancel.set()
+                        progress.update(task_id, description="Спирам след текущата стъпка… (Ctrl+C пак = веднага)")
             finally:
                 self.out = original_out
                 if handler:
@@ -1125,31 +1532,70 @@ class Repl:
             raise box["error"]  # type: ignore[misc]
         return box["result"]  # type: ignore[return-value]
 
-    def _generate(self, post_dir: Path, *, force: bool, mode_override: str | None = None) -> None:
+    def _show_draft(self, text: str) -> None:
+        """
+        Б1 (research-plan-36): първата чернова на екрана веднага щом е написана — човекът чете,
+        докато проверката и подобряването текат, вместо да гледа празен екран 3–7 минути.
+        Вика се от нишката на конвейера; `self.out` по това време сочи към конзолата на
+        прогрес-бара (виж _run_with_spinner), която rich синхронизира сама.
+        """
+        self.out("")
+        self.out(
+            self.ink.panel(
+                text,
+                title="Чернова — още я проверявам и подобрявам",
+                border_style="grey62",
+            )
+        )
+
+    def _generate(
+        self,
+        post_dir: Path,
+        *,
+        force: bool,
+        mode_override: str | None = None,
+        revision_instruction: str | None = None,
+    ) -> None:
         """
         Пуска конвейера върху `post_dir` и отпечатва резултата/грешката. Общ път за нов пост,
         /again, /revise. `mode_override` — само от /revise, когато инструкцията пряко
         противоречи на sticky режима (виж cmd_revise); None означава "ползвай sticky режима
-        на сесията", както преди.
+        на сесията", както преди. `revision_instruction` — лека ревизия (runner.run_revision)
+        вместо пълното пускане (research-plan-36, Б2).
         """
         assert self.config is not None
         effective_mode = mode_override or self.state.mode
         # Нов клиент на всяко пускане — виж докстринга на модула защо (call_log в meta.json).
         client = self.client_factory(self.config)
         started = time.monotonic()
+        self._cancel.clear()
+
+        if revision_instruction is not None:
+            call = lambda: self.revision_fn(  # noqa: E731
+                post_dir,
+                client,
+                revision_instruction,
+                knowledge=self.knowledge,
+                mode=effective_mode,
+                today=self.today,
+                on_final_check=self._show_final_check_update,
+                should_cancel=self._cancel.is_set,
+            )
+        else:
+            call = lambda: self.pipeline_fn(  # noqa: E731
+                post_dir,
+                client,
+                force=force,
+                knowledge=self.knowledge,
+                mode=effective_mode,
+                today=self.today,
+                on_final_check=self._show_final_check_update,
+                on_draft=self._show_draft,
+                should_cancel=self._cancel.is_set,
+            )
 
         try:
-            result = self._run_with_spinner(
-                lambda: self.pipeline_fn(
-                    post_dir,
-                    client,
-                    force=force,
-                    knowledge=self.knowledge,
-                    mode=effective_mode,
-                    today=self.today,
-                    on_final_check=self._show_final_check_update,
-                )
-            )
+            result = self._run_with_spinner(call)
         except AgentError as exc:
             # Критикът вече не спира конвейера (виж runner.py), така че тук идват само
             # входни и инфраструктурни грешки. Ако въпреки това на диска има текст от
@@ -1157,66 +1603,66 @@ class Repl:
             partial = read_text_or_none(post_dir / "output" / "post.md")
             if partial:
                 self._print_post(partial)
-                self.out(self.ink.warn("  ⚠ Това е текст от прекъснато пускане, не финалното предложение."))
-            self.out(self.ink.err(f"  ✗ Спряно: {exc.human_message}"))
-            if exc.detail:
+                self.out(self.ink.warn("  ⚠ Това е текст от предишно или прекъснато пускане, не новото предложение."))
+            self.out(self.ink.err(f"  ✗ {exc.human_message}"))
+            if isinstance(exc, AuthenticationError):
+                self.out(self.ink.dim("  Напишете /ключ, за да въведете нов ключ."))
+            # research-plan-36, В7: суровата причина (HTTP код, модел) е само в run.log —
+            # показва се на екрана единствено в технически изглед.
+            if exc.detail and self.state.verbose:
                 self.out(self.ink.dim(f"  Причина: {exc.detail}"))
-            self.out(self.ink.dim(f"  Пълен лог: {post_dir / 'run.log'} · /log го показва тук"))
             return
 
-        # Успешен път: конвейерът винаги стига дотук с готово предложение (виж runner.py) —
-        # печатаме текста, после резюме (статус/източници/брой извиквания/време), после
-        # всичко открито за преглед.
+        # Успешен път: конвейерът винаги стига дотук с готово предложение (виж runner.py).
         elapsed = time.monotonic() - started
         text = (read_text_or_none(result.post_path) or "").strip()
         self._print_post(text)
 
-        if result.resolution_summary:
-            self.out(self.ink.dim(f"  {result.resolution_summary}"))
-
-        for fix in result.applied_fixes:
-            self.out(self.ink.ok(f"  ✎ {fix}"))
-        for note in result.open_notes:
-            self.out(self.ink.warn(f"  ⚠ {note}"))
-        for warning in result.warnings:
-            self.out(self.ink.warn(f"  ⚠ {warning}"))
-        if result.open_notes or result.warnings:
-            self.out(self.ink.dim("  Бележките не спират поста — прегледай ги преди публикуване."))
+        if self.state.verbose:
+            if result.resolution_summary:
+                self.out(self.ink.dim(f"  {result.resolution_summary}"))
+            for fix in result.applied_fixes:
+                self.out(self.ink.ok(f"  ✎ {fix}"))
+        raw_notes = result.open_notes + result.warnings
+        # research-plan-36, В2: бележките на човешки език, с действие — без members.yaml,
+        # mention_allowed, Post II и т.н. Суровите остават в meta.json и run.log.
+        notes = raw_notes if self.state.verbose else humanize_notes(raw_notes)
+        if notes:
+            self.out("")
+            self.out(self.ink.warn("  Проверете преди публикуване:"))
+            for note in notes:
+                self.out(self.ink.warn(f"  ⚠ {note}"))
 
         # Статус, копиране и линк за браузъра НАРОЧНО последни — след всички бележки, не преди
         # тях (потребителска обратна връзка 2026-08-25: "отдолу да дава линк за в браузъра" —
         # с дълъг списък бележки линкът по-рано лесно се скриваше нагоре в скрола на терминала).
-        merged = " + ".join(result.merged_from) or "?"
-        status = self.ink.ok("✓ предложение") if result.status == "ready" else self.ink.warn("⚠ предложение с бележки")
-        calls = len(client.call_log)
-        mode_label = modes.get_mode(effective_mode).label
-        self.out(
-            f"  {status} "
-            f"{self.ink.dim(f'· {mode_label} · от {merged} · {len(text.split())} думи · {calls} извиквания · {elapsed:.0f}s')}"
-        )
-        self.out(self.ink.dim(f"  файл:    {file_uri(result.post_path)}"))
+        words = len(text.split())
+        status_text = status_label(result.status)
+        status = self.ink.ok(f"✓ {status_text}") if result.status == "ready" else self.ink.warn(f"⚠ {status_text}")
+        details = f"· {words} думи · {elapsed:.0f} сек."
+        if self.state.verbose:
+            merged = " + ".join(result.merged_from) or "?"
+            details += f" · от {merged} · {len(client.call_log)} извиквания · {modes.get_mode(effective_mode).label}"
+        self.out(f"  {status} {self.ink.dim(details)}")
 
         # Копиране в клипборда вместо ръчно маркиране от терминала — best-effort, тих провал.
         if text and self.clipboard_fn(text):
-            self.out(self.ink.dim("  📋 копирано в клипборда"))
+            self.out(self.ink.dim("  📋 Текстът е копиран — поставете го направо в LinkedIn (Ctrl+V)."))
 
-        # Автоматичен преглед след всяко успешно пускане (потребителска заявка 2026-08-18) —
-        # реалистичният изглед (текст + избрани снимки в браузър), не суровият .md файл
-        # по-горе. Best-effort: развален преглед не бива да съсипва вече готовото предложение.
-        try:
-            preview_path = render_preview(post_dir)
-            self.out(self.ink.accent(f"  🔗 Отвори в браузър (реалистичен изглед): {file_uri(preview_path)}"))
-            # Автоматично отваряне (потребителска обратна връзка 2026-09-03: "не се отваря
-            # директно в браузъра") — same механизъм като /preview (_open_in_file_manager
-            # по-долу), best-effort, огледално на copy_to_clipboard по-горе.
-            try:
-                self.open_preview_fn(preview_path)
-            except Exception:
-                pass
-        except (FileNotFoundError, OSError) as exc:
-            self.out(self.ink.dim(f"  ⚠ Прегледът не се генерира: {exc}"))
+        selected_dir = post_dir / "output" / "selected"
+        selected = sorted(selected_dir.glob("*")) if selected_dir.is_dir() else []
+        if selected:
+            self.out(self.ink.dim(f"  🖼  Избрани снимки ({len(selected)}): {selected_dir}"))
 
-        self.out(self.ink.dim("  /revise <инструкция> дошлайфа този пост · /preview за визуален изглед · нов ред = нов пост"))
+        self._refresh_preview(post_dir, announce=True, open_it=True)
+
+        self.out(
+            self.ink.dim(
+                "  Какво следва: напишете какво да се промени (напр. „по-кратко“) · „нов: …“ за нов пост · /help"
+            )
+        )
+        if not self.state.verbose and not result.insufficient_brief:
+            self.out(self.ink.dim("  Проверявам окончателния текст още веднъж във фонов режим — ще ви кажа, ако намеря нещо."))
 
         # B4 (виж research-plan-18-critique-of-plan-17.md, А2): Планерът вече прецени, че
         # брифът не носи никакво реално съдържание — постът по-горе е буквалната чернова на
@@ -1225,8 +1671,8 @@ class Repl:
         if result.insufficient_brief:
             answer = self.input_fn(
                 self.ink.accent(
-                    "  Брифът изглежда без достатъчно съдържание за пост — Enter продължава с "
-                    "това предложение, или напиши детайли сега, за да генерирам наново › "
+                    "  Брифът не стига за истински пост (или темата е от забранените). Напишете още "
+                    "подробности сега, за да опитам отново — или Enter, за да оставите текста така › "
                 )
             ).strip()
             if answer:
@@ -1234,6 +1680,26 @@ class Repl:
                 existing = (read_text_or_none(briefing_path) or "").rstrip("\n")
                 briefing_path.write_text(f"{existing}\n{answer}\n", encoding="utf-8")
                 self._generate(post_dir, force=True, mode_override=mode_override)
+
+    def _refresh_preview(self, post_dir: Path, *, announce: bool = False, open_it: bool = False) -> None:
+        """
+        Пише output/preview.html наново (best-effort). `open_it` — отваря го автоматично
+        (потребителска заявка 2026-09-03). Вика се и след фоновата проверка [7], за да влязат
+        закъснелите бележки в прегледа (research-plan-36, В6) — тогава без повторно отваряне.
+        """
+        try:
+            preview_path = render_preview(post_dir)
+        except (FileNotFoundError, OSError) as exc:
+            if announce:
+                self.out(self.ink.dim(f"  ⚠ Прегледът не се генерира: {exc}"))
+            return
+        if announce:
+            self.out(self.ink.accent(f"  🔗 Как ще изглежда в LinkedIn: {file_uri(preview_path)}"))
+        if open_it:
+            try:
+                self.open_preview_fn(preview_path)
+            except Exception:
+                pass
 
     def _show_final_check_update(self, update: FinalCheckUpdate) -> None:
         """
@@ -1243,16 +1709,34 @@ class Repl:
         нов пост. Печата директно (само best-effort подредба с водещ нов ред), вместо да чака
         следваща команда — известното ограничение (TUI/REPL не се обновяват визуално при
         закъсняла находка от стъпка 7) вече има видим изход тук, не само запис в meta.json.
+
+        research-plan-36, В2/В6: бележките са на човешки език и прегледът (preview.html) се
+        обновява, за да ги съдържа — досега закъснелите бележки никога не стигаха до него.
         """
-        label = update.post_dir.name
+        is_current = self.state.post_dir == update.post_dir
+        label = "" if is_current else f" (пост „{update.post_dir.name}“)"
+        self._refresh_preview(update.post_dir)
         if update.status == "failed":
-            self.out(self.ink.warn(f"\n  ⚠ (async: {label}) финалната проверка не успя: {update.error}"))
+            if self.state.verbose:
+                self.out(self.ink.warn(f"\n  ⚠ Окончателната проверка{label} не успя: {update.error}"))
+            else:
+                self.out(self.ink.dim(f"\n  (Окончателната проверка{label} не успя — прочетете поста внимателно.)"))
             return
-        if not update.notes:
-            self.out(self.ink.dim(f"\n  ✓ (async: {label}) финалната проверка на предложението завърши чисто."))
+        if update.autofixed:
+            # Стъпка [8] (research-plan-38): показаният текст вече е сменен — показваме новия.
+            self.out(self.ink.ok(f"\n  ✓ Агентът махна сам{label} {len(update.autofixed)} недоказани неща:"))
+            for claim in update.autofixed:
+                self.out(self.ink.dim(f"    · {claim}"))
+            if is_current:
+                fixed = (update.post_dir / "output" / "post.md")
+                if fixed.exists():
+                    self._print_post(fixed.read_text(encoding="utf-8"))
+        notes = update.notes if self.state.verbose else humanize_notes(update.notes)
+        if not notes:
+            self.out(self.ink.ok(f"\n  ✓ Окончателната проверка{label} завърши — няма нови бележки."))
             return
-        self.out(self.ink.warn(f"\n  ⚠ (async: {label}) финалната проверка намери {len(update.notes)} нови бележки:"))
-        for note in update.notes:
+        self.out(self.ink.warn(f"\n  ⚠ Окончателната проверка{label} намери още за преглед:"))
+        for note in notes:
             self.out(self.ink.warn(f"    · {note}"))
 
     def cmd_preview(self, _argument: str = "") -> None:
@@ -1280,7 +1764,7 @@ class Repl:
         се копира автоматично в клипборда (виж _generate), не чрез ръчно маркиране.
         """
         self.out("")
-        self.out(self.ink.panel(text.strip(), title="Официално предложение", border_style="green3"))
+        self.out(self.ink.panel(text.strip(), title="Предложение за публикуване", border_style="green3"))
 
 
 def _open_in_file_manager(path: Path) -> None:

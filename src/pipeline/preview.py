@@ -14,6 +14,7 @@ import html
 import json
 from pathlib import Path
 
+from src.humanize import humanize_notes, status_label
 from src.pipeline.util import read_text_or_none
 
 _MIME_BY_SUFFIX = {
@@ -81,7 +82,7 @@ _TEMPLATE = """\
 <body>
   <h1>Преглед на пост — {title}</h1>
   <div class="status {status_class}">
-    <span>Статус: <b>{status}</b> · {n_notes} открит(и) въпрос(а) · {n_warnings} предупреждение(я)</span>
+    <span><b>{status}</b>{notes_count}</span>
     <button class="copy-btn" id="copy-btn" onclick="copyPostText()">📋 Копирай текста</button>
   </div>
 
@@ -90,7 +91,7 @@ _TEMPLATE = """\
       <div class="avatar">ИКТ</div>
       <div class="who">
         <b>ИКТ Клъстер – Варна</b>
-        <span>Спонсорирано · 🌐</span>
+        <span>сега · 🌐</span>
       </div>
     </div>
     <div class="post-text" id="post-text">{post_html}</div>
@@ -158,25 +159,27 @@ def render_preview(post_dir: Path) -> Path:
         imgs = "".join(f'<img src="{_photo_data_uri(p)}" alt="{html.escape(p.name)}">' for p in photo_paths[:5])
         photos_html = f'<div class="photos n{n}">{imgs}</div>'
 
-    open_notes = meta.get("open_notes", [])
-    warnings = meta.get("warnings", [])
-    notes_items = "".join(f"<li>{html.escape(n)}</li>" for n in (open_notes + warnings))
+    # research-plan-36, В6: бележките на човешки език (както в терминала) — суровите остават
+    # в meta.json. „Спонсорирано" е махнато: постовете на клъстера не са реклама.
+    notes = humanize_notes(meta.get("open_notes", []) + meta.get("warnings", []))
+    notes_items = "".join(f"<li>{html.escape(n)}</li>" for n in notes)
     notes_html = (
-        f"<div class='notes'><p class='notes-title'>⚠ За преглед преди публикуване:</p>"
+        f"<div class='notes'><p class='notes-title'>⚠ Проверете преди публикуване:</p>"
         f"<ul>{notes_items}</ul></div>"
         if notes_items
         else ""
     )
 
     status = meta.get("status", "?")
+    final_check = (meta.get("final_check") or {}).get("status")
+    pending = " · окончателната проверка още тече — презаредете след минута" if final_check == "pending" else ""
     rendered = _TEMPLATE.format(
         title=html.escape(post_dir.name),
         post_html=html.escape(post_text.strip()),
         photos_html=photos_html,
-        status=html.escape(status),
+        status=html.escape(status_label(status)),
+        notes_count=html.escape((f" · {len(notes)} бележки" if notes else "") + pending),
         status_class=status if status in ("ready", "ready_with_notes") else "ready_with_notes",
-        n_notes=len(open_notes),
-        n_warnings=len(warnings),
         notes_html=notes_html,
     )
 

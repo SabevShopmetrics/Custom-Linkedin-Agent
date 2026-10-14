@@ -15,6 +15,8 @@ emulator не предлага собствен scrollback върху него �
 Команди:
   chat                             — readline REPL (ред по ред, /команди) — същото и БЕЗ команда
   tui                              — full-screen интерфейс (Textual); БЕЗ native terminal scrollback
+  web [--host H] [--port P] [--open] — уеб интерфейс в браузъра: бриф, снимки и ZIP архиви,
+                                     преглед „както в LinkedIn" (виж src/web/server.py)
   generate <post_dir> [--force] [--brief "текст"] [--mode кадър|фокус|панорама]
                                      — минава през седемте стъпки на конвейера (--brief пише
                                        директно briefing.md, създава папката, ако не
@@ -25,6 +27,7 @@ emulator не предлага собствен scrollback върху него �
                                      преглед в браузър на вече завършен пост
   check                            — пробва връзката с Open WebUI за всеки конфигуриран модел
   check-knowledge                  — показва кои knowledge/ файлове липсват/са празни
+  spike [--brief ФАЙЛ] [--repeat N] — мери на живо опционалните ускорявания (research-plan-36)
   bench [--only ПРЕФИКС] [--save ФАЙЛ] [--compare ФАЙЛ]
                                    — мери качеството на вече направените пускания в posts/
                                      (без нито едно извикване към модел) и го сравнява с
@@ -37,16 +40,18 @@ from __future__ import annotations
 import argparse
 import shutil
 import sys
+import threading
 import webbrowser
 from pathlib import Path
 
 from src.brand.loader import audit_knowledge
 from src.config import ConfigError, load_config
 from src.errors import AgentError
+from src.humanize import humanize_notes, status_label
 from src.llm.client import LLMClient
 from src.pipeline import modes
 from src.pipeline.preview import render_preview
-from src.pipeline.runner import run_pipeline
+from src.pipeline.runner import FinalCheckUpdate, run_pipeline
 from src.pipeline.util import file_uri
 from src.terminal import force_utf8_io
 
@@ -92,13 +97,19 @@ def cmd_generate(args: argparse.Namespace) -> int:
 
     client = LLMClient(config)
 
+    # research-plan-36, А2: постът се печата ВЕДНАГА, а финалната проверка [7] се изчаква
+    # след това (до същия таван от 90s — план 29/35). Преди `run_pipeline(...,
+    # wait_for_final_check_seconds=90)` блокираше ВЪТРЕ в конвейера и човекът гледаше празен
+    # екран до 90s за вече готов текст. План 35 (Критика 1) твърдеше обратното — грешно.
+    final_check_done = threading.Event()
+    final_updates: list[FinalCheckUpdate] = []
+
+    def on_final_check(update: FinalCheckUpdate) -> None:
+        final_updates.append(update)
+        final_check_done.set()
+
     try:
-        # wait_for_final_check_seconds=90: `generate` е еднократно извикване — процесът
-        # приключва веднага след печат и убива daemon нишката на стъпка [7], преди тя изобщо
-        # да напише резултат (виж докстринга на run_pipeline и research-plan-29). За разлика
-        # от REPL/chat, тук блокирането до 90s не бави следваща команда — просто резултатът
-        # се връща малко по-късно, best-effort.
-        result = run_pipeline(post_dir, client, force=force, mode=mode_key, wait_for_final_check_seconds=90.0)
+        result = run_pipeline(post_dir, client, force=force, mode=mode_key, on_final_check=on_final_check)
     except AgentError as exc:
         # Единствените изключения тук са за вход/инфраструктура — виж докстринга на runner.py.
         print(f"\n✗ Спряно: {exc.human_message}")
@@ -110,9 +121,13 @@ def cmd_generate(args: argparse.Namespace) -> int:
         print(f"Пълен лог: {post_dir / 'run.log'}")
         return 1
 
-    # Отвъд тази точка конвейерът винаги е успял — само печатаме резюме и открити въпроси.
+    # Отвъд тази точка конвейерът винаги е успял — печатаме текста, после резюме и бележки.
+    post_text = (result.post_path.read_text(encoding="utf-8") if result.post_path.exists() else "").strip()
+    print("\n" + "─" * 60)
+    print(post_text)
+    print("─" * 60)
     merged = ", ".join(result.merged_from) or "?"
-    print(f"\n✓ Официалното предложение е в: {result.post_path} (от {merged})")
+    print(f"\n✓ {status_label(result.status)} — {result.post_path} (от {merged})")
     print(f"  файл:    {file_uri(result.post_path)}")
 
     # Автоматичен преглед след всяко успешно пускане (потребителска заявка 2026-08-18) —
@@ -140,18 +155,53 @@ def cmd_generate(args: argparse.Namespace) -> int:
         for fix in result.applied_fixes:
             print(f"  - {fix}")
 
-    if result.open_notes:
-        print(f"\n⚠ {len(result.open_notes)} открит(и) въпрос(а) в предложението — прегледайте преди публикуване:")
-        for note in result.open_notes:
+    notes = humanize_notes(result.open_notes + result.warnings)
+    if notes:
+        print(f"\n⚠ Проверете преди публикуване ({len(notes)}):")
+        for note in notes:
             print(f"  - {note}")
 
-    if result.warnings:
-        print(f"\n⚠ {len(result.warnings)} предупреждение(я) за снимки:")
-        for warning in result.warnings:
-            print(f"  - {warning}")
+    meta_final = _final_check_status(result.meta_path)
+    if meta_final == "pending":
+        print("\n… Проверявам окончателния текст още веднъж (до 90 сек.) — текстът по-горе вече е готов.")
+        final_check_done.wait(timeout=90.0)
+        if final_updates:
+            update = final_updates[0]
+            late = humanize_notes(update.notes)
+            if update.autofixed:
+                # Стъпка [8] (research-plan-38): текстът по-горе вече е сменен — показваме новия.
+                print(f"\n✓ Агентът махна сам {len(update.autofixed)} недоказани неща:")
+                for claim in update.autofixed:
+                    print(f"  - {claim}")
+                fixed_text = (result.post_path.read_text(encoding="utf-8") if result.post_path.exists() else "").strip()
+                print("\nПоправеният пост:\n")
+                print(fixed_text)
+            if update.status == "failed":
+                print("  Окончателната проверка не успя — прочетете поста внимателно.")
+            elif late:
+                print(f"⚠ Окончателната проверка намери още {len(late)}:")
+                for note in late:
+                    print(f"  - {note}")
+            else:
+                print("✓ Окончателната проверка завърши — няма нови бележки.")
+            try:
+                render_preview(post_dir)  # закъснелите бележки влизат и в прегледа
+            except (FileNotFoundError, OSError):
+                pass
+        else:
+            print("  Проверката не завърши навреме — продължава във фонов режим само докато процесът е жив.")
 
     print(f"\nПълен лог: {post_dir / 'run.log'}")
     return 0
+
+
+def _final_check_status(meta_path: Path) -> str | None:
+    import json
+
+    try:
+        return (json.loads(meta_path.read_text(encoding="utf-8")).get("final_check") or {}).get("status")
+    except (OSError, ValueError):
+        return None
 
 
 def cmd_new(args: argparse.Namespace) -> int:
@@ -243,6 +293,13 @@ def cmd_check_knowledge(_args: argparse.Namespace) -> int:
         )
     print(f"examples/bad/: {audit['bad_examples_count']} примера")
 
+    # research-plan-36, Г4: размерът на общия промпт и „бележки за разработчици" в него.
+    print(f"\nОбщ контекст в промпта: {audit['stable_context_chars']} знака (след почистване 2026-10-09: ~12.5k)")
+    if audit["dated_notes_in_prompt"]:
+        print("  ⚠ Датирани бележки за разработчици стигат до модела — сложете ги в <!-- коментар -->:")
+        for line in audit["dated_notes_in_prompt"]:
+            print(f"    - {line}")
+
     # Финалната присъда: и без пълен корпус конвейерът работи (връща 0 винаги, само
     # предупреждава) — return code 1 тук би спрял CI/скриптове напразно.
     missing_or_empty = [e.path for e in audit["files"] if not e.usable]
@@ -293,12 +350,55 @@ def cmd_preview(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_spike(args: argparse.Namespace) -> int:
+    """Мери на живо опционалните ускорявания (research-plan-36, Б3/Б4) — виж src/spike.py."""
+    from src.spike import run_spike
+
+    try:
+        config = load_config()
+    except ConfigError as exc:
+        print(f"Грешка в конфигурацията: {exc}")
+        return 1
+    return run_spike(config, brief_path=Path(args.brief), repeat=args.repeat)
+
+
 def cmd_tui(_args: argparse.Namespace) -> int:
     # Импортът е вътре във функцията по същата причина като cmd_chat — textual/rich не се
     # плащат при `generate`/`check` в скрипт или cron.
     from src.tui import main as tui_main
 
     return tui_main()
+
+
+def cmd_web(args: argparse.Namespace) -> int:
+    """Уеб интерфейс в браузъра — виж src/web/server.py. Настройки: WEB_HOST/WEB_PORT/WEB_PASSWORD в .env."""
+    import os
+
+    from dotenv import load_dotenv
+
+    from src.web.server import DEFAULT_PORT, serve
+
+    load_dotenv(override=False)
+    host = args.host or os.environ.get("WEB_HOST", "").strip() or "127.0.0.1"
+    port_raw = str(args.port or os.environ.get("WEB_PORT", "").strip() or DEFAULT_PORT)
+    if not port_raw.isdigit():
+        print(f"Грешка: WEB_PORT трябва да е число, получено: '{port_raw}'")
+        return 1
+    password = os.environ.get("WEB_PASSWORD", "").strip() or None
+    max_jobs_raw = os.environ.get("WEB_MAX_JOBS", "").strip()
+    max_jobs = int(max_jobs_raw) if max_jobs_raw.isdigit() else 3
+    # Браузърът се отваря само при изрично --open (start_web.bat) — никога от тестове/скриптове.
+    opener = (lambda url: webbrowser.open(url)) if args.open else None
+    return serve(
+        host=host,
+        port=int(port_raw),
+        password=password,
+        posts_dir=POSTS_DIR,
+        open_browser=opener,
+        max_jobs=max_jobs,
+        tls_cert=os.environ.get("WEB_TLS_CERT", "").strip() or None,
+        tls_key=os.environ.get("WEB_TLS_KEY", "").strip() or None,
+    )
 
 
 def cmd_chat(_args: argparse.Namespace) -> int:
@@ -321,6 +421,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     tui_parser = subparsers.add_parser("tui", help="full-screen интерфейс (Textual)")
     tui_parser.set_defaults(func=cmd_tui)
+
+    web_parser = subparsers.add_parser("web", help="уеб интерфейс в браузъра (бриф, снимки/ZIP, преглед)")
+    web_parser.add_argument("--host", default=None, help="адрес за слушане (подразбиране WEB_HOST или 127.0.0.1)")
+    web_parser.add_argument("--port", type=int, default=None, help="порт (подразбиране WEB_PORT или 8765)")
+    web_parser.add_argument("--open", action="store_true", help="отваря интерфейса в браузъра след старт")
+    web_parser.set_defaults(func=cmd_web)
 
     generate_parser = subparsers.add_parser("generate", help="генерира пост от бриф + снимки")
     generate_parser.add_argument("post_dir", help="папка на поста, напр. posts/2026-07-praktiki")
@@ -360,6 +466,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     preview_parser.add_argument("post_dir", help="папка на вече завършен пост, напр. posts/2026-07-praktiki")
     preview_parser.set_defaults(func=cmd_preview)
+
+    spike_parser = subparsers.add_parser(
+        "spike", help="мери на живо дали изключване на мисленето / гарантиран JSON ускоряват агента"
+    )
+    spike_parser.add_argument("--brief", default="bench/briefs/02-bogat-brief-sabitie.md", help="бриф за пробата")
+    spike_parser.add_argument("--repeat", type=int, default=2, help="колко пъти всеки вариант (медиана)")
+    spike_parser.set_defaults(func=cmd_spike)
 
     bench_parser = subparsers.add_parser(
         "bench", help="мери качеството на вече направените пускания (без извикване към модел)"

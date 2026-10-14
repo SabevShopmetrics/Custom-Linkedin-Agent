@@ -1,0 +1,226 @@
+/*
+ * Туториал, „Настройки" и екипът на агентите (web-ui-5). Само токени от app.css — работи и в
+ * светла, и в тъмна тема. Позициите се задават през CSSOM (CSP забранява style="…").
+ */
+
+/* ------------------------------------------------------------------ туториал */
+.tour { position: fixed; inset: 0; z-index: 85; }
+.tour-block { position: absolute; inset: 0; }
+.tour.no-target .tour-block, .tour.waiting .tour-block { background: rgba(9, 20, 26, .55); }
+.tour-spot {
+  position: fixed; border-radius: 12px; pointer-events: none;
+  box-shadow: 0 0 0 3px var(--accent), 0 0 0 9999px rgba(9, 20, 26, .55);
+  transition: top .25s ease, left .25s ease, width .25s ease, height .25s ease;
+}
+.tour.no-target .tour-spot, .tour.waiting .tour-spot { display: none; }
+
+.tour-card {
+  position: fixed; width: min(440px, calc(100vw - 32px)); max-height: calc(100vh - 32px); overflow: hidden;
+  background: var(--surface); color: var(--text); border-radius: var(--radius); box-shadow: var(--shadow-lg);
+  border: 1px solid var(--line); padding: 18px 20px 14px; display: flex; flex-direction: column; gap: 12px;
+  transition: top .25s ease, left .25s ease;
+}
+.tour-card.wide { width: min(680px, calc(100vw - 32px)); }
+.tour.no-target .tour-card, .tour.waiting .tour-card { top: 50% !important; left: 50% !important; transform: translate(-50%, -50%); }
+.tour.narrow .tour-card {
+  top: auto !important; left: 8px !important; right: 8px; bottom: 8px; transform: none; width: auto; max-height: 62vh;
+}
+
+.tour-head { position: relative; padding-right: 32px; flex: none; }
+/* Само съдържанието скролира — заглавието, главите и „Назад/Напред“ винаги се виждат. */
+.tour-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; padding-right: 4px; }
+.tour-chapters, .tour-progress, .tour-foot { flex: none; }
+.tour-kicker { margin: 0 0 4px; font-size: 11.5px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--accent); }
+.tour-head h2 { font-family: var(--serif); font-size: 21px; line-height: 1.25; }
+.tour-x { position: absolute; top: -4px; right: -6px; }
+
+.tour-rows { display: grid; grid-template-columns: max-content 1fr; gap: 6px 12px; margin: 0; font-size: 14px; }
+.tour-rows dt { font-weight: 700; color: var(--muted); font-size: 12.5px; padding-top: 2px; }
+.tour-rows dd { margin: 0; }
+
+.tour-path { margin: 4px 0 0; padding: 0; list-style: none; counter-reset: p; display: flex; flex-direction: column; gap: 6px; }
+.tour-path li { counter-increment: p; display: flex; gap: 10px; align-items: baseline; font-size: 13.5px; }
+.tour-path li::before {
+  content: counter(p); flex: none; width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center;
+  background: var(--accent-soft); color: var(--accent); font-weight: 700; font-size: 12px;
+}
+
+.tour-team { margin: 4px 0 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 8px; }
+.tour-team li { display: grid; grid-template-columns: 1fr auto; gap: 1px 10px; font-size: 13px; padding: 7px 10px; border-radius: 9px; background: var(--surface-2); }
+.tour-team b { font-size: 13.5px; }
+.tour-team small { color: var(--faint); font-size: 11.5px; white-space: nowrap; }
+.tour-team span { grid-column: 1 / -1; color: var(--muted); }
+
+.tour-format { display: flex; flex-direction: column; gap: 8px; font-size: 13.5px; }
+.tour-format p { margin: 0; }
+.tour-format pre {
+  margin: 0; padding: 10px 12px; border-radius: 9px; background: var(--surface-2); border: 1px solid var(--line);
+  font: 12.5px/1.5 Consolas, "Cascadia Mono", monospace; white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.tour-ok { display: flex; gap: 8px; align-items: flex-start; padding: 8px 10px; border-radius: 9px; background: var(--ok-soft); }
+.tour-ok svg { color: var(--ok); margin-top: 2px; }
+.tour-label { font-size: 11.5px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.tour-tips { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 5px; font-size: 13.5px; }
+.tour-why { color: var(--muted); font-style: italic; }
+
+.tour-chapters { display: flex; flex-wrap: wrap; gap: 4px; }
+.tour-chip {
+  border: 1px solid var(--line); background: transparent; color: var(--muted); border-radius: 999px;
+  padding: 2px 9px; font-size: 12px; font-weight: 600; cursor: pointer;
+}
+.tour-chip:hover { border-color: var(--accent); color: var(--accent); }
+.tour-chip.done { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 35%, transparent); }
+.tour-chip.current { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+.tour-progress { height: 4px; border-radius: 4px; background: var(--surface-2); overflow: hidden; }
+.tour-progress i { display: block; height: 100%; background: var(--accent); transition: width .25s ease; }
+.tour-foot { display: flex; align-items: center; gap: 8px; }
+.tour-skip { color: var(--muted); font-weight: 600; }
+
+@media (prefers-reduced-motion: reduce) {
+  .tour-spot, .tour-card, .tour-progress i { transition: none; }
+}
+
+/* ------------------------------------------------------------------ настройки */
+.st .view-head { margin-bottom: 20px; }
+.st-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 14px; }
+.st-card { background: var(--surface); border-radius: var(--radius); box-shadow: var(--shadow); padding: 16px 18px; display: flex; flex-direction: column; gap: 10px; }
+.st-card h2 { font-family: var(--serif); font-size: 17px; display: flex; align-items: center; gap: 8px; }
+.st-card h2 svg { color: var(--accent); }
+.st-card p { margin: 0; font-size: 14px; }
+.st-tour { border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent); }
+.st-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.st-label { font-size: 12px !important; font-weight: 700; color: var(--muted); }
+.st-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.st-check { display: flex; gap: 10px; align-items: flex-start; cursor: pointer; font-size: 14px; }
+.st-check input { margin-top: 3px; accent-color: var(--accent); }
+.st-check span { display: flex; flex-direction: column; }
+.st-check small { color: var(--muted); font-size: 12.5px; }
+.st-env { display: flex; gap: 6px; align-items: flex-start; color: var(--faint); font-size: 12.5px !important; margin-top: auto !important; }
+.st-env svg { width: 15px; height: 15px; margin-top: 2px; }
+.st-warn { color: var(--warn); background: var(--warn-soft); border-radius: 8px; padding: 6px 10px; }
+.st-list { margin: 0; padding-left: 18px; font-size: 14px; display: flex; flex-direction: column; gap: 4px; }
+.st-team summary { cursor: pointer; color: var(--accent); font-weight: 600; font-size: 13.5px; }
+.st .path { font: 12.5px/1.4 Consolas, "Cascadia Mono", monospace; overflow-wrap: anywhere; color: var(--muted); }
+
+/* ------------------------------------------------------------------ избор на папка, качване (web-ui-5) */
+.fd-input { flex: 1; min-width: 0; border: 1px solid var(--line); background: var(--surface-2); border-radius: 9px; padding: 6px 10px; font: 12.5px/1.4 Consolas, "Cascadia Mono", monospace; color: var(--text); }
+.fd-input:focus { outline: none; border-color: var(--accent); }
+.inbox-btn { display: inline-flex; }
+.inbox-list { margin: 4px 0 0; padding: 0; list-style: none; max-height: min(46vh, 420px); overflow-y: auto; border: 1px solid var(--line); border-radius: 10px; }
+.inbox-list li { display: grid; grid-template-columns: 130px 1fr; gap: 0 12px; padding: 8px 12px; border-bottom: 1px solid var(--line); font-size: 13.5px; }
+.inbox-list li:last-child { border-bottom: 0; }
+.inbox-list .inbox-when { grid-row: span 2; color: var(--accent); font-weight: 700; font-size: 12.5px; padding-top: 1px; }
+.inbox-list small { color: var(--muted); }
+.inbox-progress {
+  position: fixed; right: 18px; bottom: 18px; z-index: 88; width: min(360px, calc(100vw - 36px));
+  background: var(--surface); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow-lg);
+  padding: 12px 14px; display: flex; flex-direction: column; gap: 6px; font-size: 13px;
+}
+.inbox-progress b { display: flex; align-items: center; gap: 8px; font-size: 14px; }
+.inbox-progress b svg { color: var(--accent); }
+.inbox-progress > span:not(.inbox-bar) { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.inbox-bar { height: 5px; border-radius: 5px; background: var(--surface-2); overflow: hidden; }
+.inbox-bar i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .3s ease; }
+
+/* ------------------------------------------------------------------ собствени контроли (controls.js, web-ui-5) */
+.ui-native { position: absolute !important; width: 1px !important; height: 1px !important; opacity: 0 !important; pointer-events: none !important; overflow: hidden; }
+.ui-field {
+  display: inline-flex; align-items: center; gap: 8px; min-width: 0; max-width: 100%;
+  border: 1px solid var(--line-strong); background: var(--surface); color: var(--text);
+  border-radius: 9px; padding: 6px 10px; font-size: 13.5px; line-height: 1.3; cursor: pointer; text-align: left;
+  transition: border-color .12s, box-shadow .12s, background .12s;
+}
+.ui-field:hover:not(:disabled) { border-color: var(--accent); }
+.ui-field.open, .ui-field:focus-visible { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent); }
+.ui-field:disabled { opacity: .55; cursor: not-allowed; background: var(--surface-2); }
+.ui-field > svg:first-child { width: 16px; height: 16px; color: var(--accent); }
+.ui-field .ui-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ui-field .ui-label.placeholder { color: var(--faint); }
+.ui-chev { width: 14px !important; height: 14px !important; color: var(--faint); transform: rotate(90deg); transition: transform .15s; margin-left: auto; }
+.ui-field.open .ui-chev { transform: rotate(-90deg); color: var(--accent); }
+.ui-date { min-width: 150px; }
+.ui-time { min-width: 96px; }
+.plan-when .ui-field, .plan-side .ui-field, .pv-row .ui-field { width: 100%; }
+
+.ui-pop {
+  position: fixed; z-index: 95; background: var(--surface); color: var(--text); border: 1px solid var(--line);
+  border-radius: 12px; box-shadow: var(--shadow-lg); padding: 6px; animation: rise .12s ease-out; max-width: calc(100vw - 16px);
+}
+.ui-list { display: flex; flex-direction: column; gap: 1px; max-height: 280px; overflow-y: auto; outline: none; }
+.ui-option {
+  display: flex; align-items: center; gap: 10px; justify-content: space-between; border: 0; background: transparent;
+  color: var(--text); text-align: left; padding: 7px 10px; border-radius: 8px; font-size: 13.5px; cursor: pointer; white-space: nowrap;
+}
+.ui-option:hover, .ui-option:focus-visible { outline: none; background: var(--hover); }
+.ui-option.selected { color: var(--accent); font-weight: 700; background: var(--accent-soft); }
+.ui-option svg { width: 15px; height: 15px; }
+.ui-option:disabled { color: var(--faint); cursor: not-allowed; }
+
+.ui-cal { width: 272px; padding: 4px; }
+.ui-cal-head { display: flex; align-items: center; justify-content: space-between; padding: 2px 2px 8px; }
+.ui-cal-head b { font-family: var(--serif); font-size: 15px; }
+.ui-cal-week, .ui-cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; }
+.ui-cal-week span { text-align: center; font-size: 11px; font-weight: 700; color: var(--faint); padding-bottom: 4px; text-transform: uppercase; }
+.ui-day { aspect-ratio: 1; border: 0; background: transparent; color: var(--text); border-radius: 9px; font-size: 13px; cursor: pointer; }
+.ui-day:hover:not(:disabled), .ui-day:focus-visible { outline: none; background: var(--hover); }
+.ui-day.off { color: var(--faint); }
+.ui-day.today { box-shadow: inset 0 0 0 1.5px var(--accent); font-weight: 700; }
+.ui-day.selected { background: var(--accent); color: var(--on-accent); font-weight: 700; }
+.ui-day:disabled { color: var(--line-strong); cursor: not-allowed; text-decoration: line-through; }
+.ui-cal-foot { display: flex; justify-content: space-between; padding: 8px 4px 2px; border-top: 1px solid var(--line); margin-top: 6px; }
+
+.ui-timepick { display: flex; flex-direction: column; gap: 6px; width: 170px; }
+.ui-timepick-top { display: flex; gap: 6px; }
+.ui-time-input { flex: 1; min-width: 0; border: 1px solid var(--line-strong); background: var(--surface-2); color: var(--text); border-radius: 8px; padding: 5px 8px; font-size: 14px; font-variant-numeric: tabular-nums; }
+.ui-time-input:focus { outline: none; border-color: var(--accent); }
+.ui-time-input.bad { border-color: var(--err); }
+.ui-times { max-height: 220px; }
+.ui-times .ui-option { font-variant-numeric: tabular-nums; }
+
+/* Отметка — без браузърския вид. */
+input[type="checkbox"] {
+  appearance: none; -webkit-appearance: none; margin: 0; flex: none;
+  width: 18px; height: 18px; border-radius: 5px; border: 1.5px solid var(--line-strong); background: var(--surface);
+  display: inline-grid; place-content: center; cursor: pointer; transition: background .12s, border-color .12s;
+}
+input[type="checkbox"]::before {
+  content: ""; width: 11px; height: 11px; background: var(--on-accent); transform: scale(0); transition: transform .12s;
+  clip-path: polygon(14% 52%, 0 66%, 38% 100%, 100% 22%, 86% 8%, 38% 72%);
+}
+input[type="checkbox"]:checked { background: var(--accent); border-color: var(--accent); }
+input[type="checkbox"]:checked::before { transform: scale(1); }
+input[type="checkbox"]:hover:not(:disabled) { border-color: var(--accent); }
+input[type="checkbox"]:focus-visible { outline: none; box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 25%, transparent); }
+input[type="checkbox"]:disabled { opacity: .5; cursor: not-allowed; }
+
+/* Ленти за превъртане — тънки, в цветовете на темата. */
+* { scrollbar-width: thin; scrollbar-color: var(--line-strong) transparent; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 10px; border: 3px solid transparent; background-clip: padding-box; }
+::-webkit-scrollbar-thumb:hover { background-color: var(--faint); }
+
+/* ------------------------------------------------------------------ табло на пакет (board.js, web-ui-5) */
+.bd-kpis { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 8px; margin-bottom: 16px; }
+.bd-kpi { background: var(--surface); border-radius: 12px; box-shadow: var(--shadow); padding: 10px 12px; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.bd-kpi b { font-family: var(--serif); font-size: 22px; line-height: 1.1; font-variant-numeric: tabular-nums; }
+.bd-kpi small { color: var(--muted); font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bd-kpi.ok b { color: var(--ok); }
+.bd-kpi.acc b { color: var(--accent); }
+.bd-kpi.warn { box-shadow: inset 0 0 0 1px var(--warn-line); background: var(--warn-soft); }
+.bd-kpi.warn b { color: var(--warn); }
+.bd-filters { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 16px; margin-bottom: 4px; }
+.bd-filters .tour-chip { padding: 4px 11px; font-size: 12.5px; }
+.bd-filters .tour-chip:disabled { opacity: .45; cursor: default; }
+.bd-flags { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 0; font-size: 12.5px; }
+.bd-ok { display: inline-flex; align-items: center; gap: 4px; color: var(--ok); font-weight: 700; }
+.bd-ok svg { width: 14px; height: 14px; }
+.bd-digest { color: var(--muted); }
+.bd-digest.warn { color: var(--warn); }
+.bd-time { color: var(--accent) !important; font-weight: 700; }
+.bd-card.attn { box-shadow: inset 3px 0 0 var(--warn), var(--shadow); }
+
+
+.bd-stat-note { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); font-size: 13px; }
+.bd-stat-note svg { width: 14px; height: 14px; color: var(--ok); }
+@media (max-width: 1100px) { .bd-kpis { grid-template-columns: repeat(3, minmax(0, 1fr)); } }

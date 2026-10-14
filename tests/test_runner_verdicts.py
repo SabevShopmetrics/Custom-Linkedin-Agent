@@ -26,8 +26,9 @@ from src.llm.schema import (
     CritiqueSchema,
     FactCheck,
     FactSource,
-    MediaSelectionItem,
     MediaSelectionSchema,
+    PhotoKind,
+    PhotoReviewSchema,
     PlanSchema,
     RuleViolation,
     Verdict,
@@ -95,7 +96,7 @@ def make_client(
     writer: list[Any],
     critic: list[Any],
     consolidator: list[Any],
-    media: MediaSelectionSchema | None = None,
+    media: PhotoReviewSchema | None = None,
 ) -> FakeSequencedClient:
     return FakeSequencedClient(
         {
@@ -564,7 +565,7 @@ def test_wait_for_final_check_seconds_timeout_falls_back_to_pending_result(tmp_p
         critic=[CLEAN_CRITIQUE, tone_critique("находка, пристигнала твърде късно")],
         consolidator=["Пост."],
     )
-    client = _DelayedRoleClient(inner, delay_role=Role.CRITIC, delay_call_index=1, delay_seconds=0.3)
+    client = _DelayedRoleClient(inner, delay_role=Role.CRITIC, delay_call_index=1, delay_seconds=1.0)
 
     result = run_pipeline(post_dir, client, knowledge=make_brand_knowledge(), wait_for_final_check_seconds=0.05)
 
@@ -739,9 +740,7 @@ def test_possible_minor_photo_is_a_warning_not_a_stopping_condition(tmp_path):
         writer=["Готов текст."],
         critic=[CLEAN_CRITIQUE, CLEAN_CRITIQUE],
         consolidator=["Готов текст."],
-        media=MediaSelectionSchema(
-            selected=[MediaSelectionItem(filename="a.jpg", reason="показва учениците", possible_minor=True)]
-        ),
+        media=PhotoReviewSchema(kind=PhotoKind.PHOTO, description="показва учениците", possible_minor=True),
     )
 
     result = run_pipeline(post_dir, client, knowledge=make_brand_knowledge())
@@ -767,15 +766,11 @@ def test_topical_mismatch_photo_is_an_open_note_not_a_warning(tmp_path):
         writer=["Готов текст."],
         critic=[CLEAN_CRITIQUE, CLEAN_CRITIQUE],
         consolidator=["Готов текст."],
-        media=MediaSelectionSchema(
-            selected=[
-                MediaSelectionItem(
-                    filename="a.jpg",
-                    reason="единствената налична снимка",
-                    topical_mismatch=True,
-                    mismatch_reason="обща снимка от networking, без връзка с повода",
-                )
-            ]
+        media=PhotoReviewSchema(
+            kind=PhotoKind.PHOTO,
+            description="единствената налична снимка",
+            topical_mismatch=True,
+            mismatch_reason="обща снимка от networking, без връзка с повода",
         ),
     )
 
@@ -802,9 +797,8 @@ def test_media_selection_backward_compatible_without_new_optional_fields(tmp_pat
         writer=["Готов текст."],
         critic=[CLEAN_CRITIQUE, CLEAN_CRITIQUE],
         consolidator=["Готов текст."],
-        media=MediaSelectionSchema(
-            selected=[MediaSelectionItem(filename="a.jpg", reason="показва момента")]
-        ),
+        # Отговор без topical_mismatch/mismatch_reason изобщо — трябва да парсне без бележка.
+        media=PhotoReviewSchema.model_validate({"kind": "photo", "description": "показва момента"}),
     )
 
     result = run_pipeline(post_dir, client, knowledge=make_brand_knowledge())
