@@ -55,15 +55,15 @@ def test_date_and_time_come_from_the_folder_name():
 def test_issues_and_lanes():
     sched = {"time_warning": "казва „вчера“", "needs_brief": False}
     problems = flow.issues(has_text=True, meta={"status": "ready_with_notes", "open_notes": ["а"], "warnings": []},
-                           sched=sched, minors=1, job_error=None, source_changed=True, published=False)
-    assert [p["kind"] for p in problems] == ["minor", "time", "source", "notes"]
+                           sched=sched, job_error=None, source_changed=True, published=False)
+    assert [p["kind"] for p in problems] == ["time", "source", "notes"]
     assert flow.lane(running=False, queued=False, has_text=True, published=False, problems=problems, needs_brief=False) == "review"
     only_notes = [p for p in problems if p["kind"] == "notes"]
     assert flow.lane(running=False, queued=False, has_text=True, published=False, problems=only_notes, needs_brief=False) == "ready"
-    failed = flow.issues(has_text=False, meta={}, sched={}, minors=0, job_error="таймаут", source_changed=False, published=False)
+    failed = flow.issues(has_text=False, meta={}, sched={}, job_error="таймаут", source_changed=False, published=False)
     assert failed[0]["kind"] == "failed"
     assert flow.lane(running=False, queued=False, has_text=False, published=False, problems=failed, needs_brief=False) == "review"
-    overdue = flow.issues(has_text=True, meta={"status": "ready"}, sched={}, minors=0, job_error=None,
+    overdue = flow.issues(has_text=True, meta={"status": "ready"}, sched={}, job_error=None,
                           source_changed=False, published=False, overdue=True)
     assert overdue[0]["kind"] == "due"
 

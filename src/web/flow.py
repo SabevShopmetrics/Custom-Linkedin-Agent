@@ -108,7 +108,6 @@ def issues(
     has_text: bool,
     meta: dict[str, Any],
     sched: dict[str, Any],
-    minors: int,
     job_error: str | None,
     source_changed: bool,
     published: bool,
@@ -136,9 +135,6 @@ def issues(
                              else "Часът дойде — публикувайте го в LinkedIn и натиснете „Публикувах го“.")})
     if meta.get("insufficient_brief"):
         out.append({"kind": "thin", "level": "error", "text": "Брифът не стига за истински пост — допишете подробности."})
-    if minors:
-        out.append({"kind": "minor", "level": "error",
-                    "text": f"{minors} {'снимка може' if minors == 1 else 'снимки може'} да показва непълнолетни — нужно е съгласие."})
     if sched.get("time_warning"):
         out.append({"kind": "time", "level": "warn", "text": sched["time_warning"]})
     if source_changed:

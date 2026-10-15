@@ -55,10 +55,6 @@ class MediaSelectionItem(BaseModel):
 
     filename: str
     reason: str
-    possible_minor: bool = Field(
-        default=False,
-        description="true ако снимката вероятно показва лице под 18 г. — задейства задължителен човешки преглед",
-    )
     # research-plan-34-speed-quality-second-pass.md (Част 4) / research-plan-35-critique-of-
     # plan-34.md (Критика 5): и двете полета НЕЗАДЪЛЖИТЕЛНИ (`| None`, подразбиране None), не
     # задължителни — модел, който не ги попълни (по-стар few-shot паметов отпечатък, или
@@ -96,7 +92,6 @@ class PhotoReviewSchema(BaseModel):
     kind: PhotoKind
     description: str = Field(default="", description="какво показва, до 20 думи")
     strength: int = Field(default=3, description="1–5: колко силна е като първа снимка на поста")
-    possible_minor: bool = False
     topical_mismatch: bool | None = None
     mismatch_reason: str | None = None
 

@@ -583,14 +583,6 @@ def _run_pipeline_v3(
             open_notes.append(loss_note)
             log.warning("[6б] %s", loss_note)
 
-    if any(item.possible_minor for item in media_selection.selected):
-        warning_text = (
-            "Избрана снимка е маркирана от Media Picker като вероятно съдържаща непълнолетни лица — "
-            "прегледайте ръчно преди публикуване."
-        )
-        warnings.append(warning_text)
-        log.warning(warning_text)
-
     # research-plan-34-speed-quality-second-pass.md (Част 4): Media Picker досега подбираше
     # снимки без преценка дали пасват тематично на брифа — открито на живо (хакатон бриф,
     # избрани общи networking снимки без коментар). open_notes, не warnings — несъответствие
@@ -817,14 +809,6 @@ def _run_pipeline_v5(
         log.info("[6] бележка: %s", note)
     open_notes.extend(formatted.notes)
 
-    if any(item.possible_minor for item in media_selection.selected):
-        warning_text = (
-            "Избрана снимка е маркирана от Media Picker като вероятно съдържаща непълнолетни лица — "
-            "прегледайте ръчно преди публикуване."
-        )
-        warnings.append(warning_text)
-        log.warning(warning_text)
-
     # research-plan-34-speed-quality-second-pass.md (Част 4): Media Picker досега подбираше
     # снимки без преценка дали пасват тематично на брифа — открито на живо (хакатон бриф,
     # избрани общи networking снимки без коментар). open_notes, не warnings — несъответствие
@@ -891,11 +875,6 @@ def _photo_notes(media_selection) -> tuple[list[str], list[str]]:
     """(open_notes, warnings) за избраните снимки — същите текстове като в v3/v5 по-горе."""
     notes: list[str] = []
     warnings: list[str] = []
-    if any(item.possible_minor for item in media_selection.selected):
-        warnings.append(
-            "Избрана снимка е маркирана от Media Picker като вероятно съдържаща непълнолетни лица — "
-            "прегледайте ръчно преди публикуване."
-        )
     for item in media_selection.selected:
         if item.topical_mismatch:
             reason_suffix = f": {item.mismatch_reason}" if item.mismatch_reason else ""

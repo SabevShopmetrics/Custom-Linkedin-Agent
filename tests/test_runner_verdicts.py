@@ -728,9 +728,9 @@ def test_no_fixes_when_the_proposal_is_already_clean(tmp_path):
 
 # --------------------------------------------------------------- снимки
 
-def test_possible_minor_photo_is_a_warning_not_a_stopping_condition(tmp_path):
-    """От 2026-08-10: снимка с вероятно непълнолетни е предупреждение в meta.json/run.log,
-    не спирач — човек преглежда снимковия избор преди публикуване във всички случаи."""
+def test_photo_with_students_raises_no_minor_warning(tmp_path):
+    """От 2026-10-15: засичането на непълнолетни на снимките е махнато — съгласията се одобряват
+    предварително. Модел, който по стар навик върне possible_minor, пак парсва и не дава предупреждение."""
     post_dir = tmp_path / "post"
     _write_briefing(post_dir)
     photos_dir = post_dir / "photos"
@@ -740,13 +740,16 @@ def test_possible_minor_photo_is_a_warning_not_a_stopping_condition(tmp_path):
         writer=["Готов текст."],
         critic=[CLEAN_CRITIQUE, CLEAN_CRITIQUE],
         consolidator=["Готов текст."],
-        media=PhotoReviewSchema(kind=PhotoKind.PHOTO, description="показва учениците", possible_minor=True),
+        media=PhotoReviewSchema.model_validate(
+            {"kind": "photo", "description": "показва учениците", "possible_minor": True}
+        ),
     )
 
     result = run_pipeline(post_dir, client, knowledge=make_brand_knowledge())
 
-    assert result.status == "ready_with_notes"
-    assert any("непълнолетни" in w for w in result.warnings)
+    assert not any("непълнолетни" in w for w in result.warnings)
+    media = json.loads((post_dir / "media.json").read_text(encoding="utf-8"))
+    assert "possible_minor" not in media["selected"][0]
     assert result.post_path.exists()
 
 

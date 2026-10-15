@@ -866,13 +866,12 @@ def test_media_picker_assemble_drops_screen_captures_and_orders_by_strength(tmp_
     assert "скрийншот" in result.excluded[0].reason
 
 
-def test_media_picker_keeps_photo_whose_review_failed_and_flags_it_for_a_human(tmp_path):
+def test_media_picker_keeps_photo_whose_review_failed(tmp_path):
     from src.pipeline import media_picker
 
     photos = [tmp_path / n for n in ("a.jpg", "b.jpg")]
     result = media_picker._assemble(photos, [None, _review("photo", 2)])
     assert [item.filename for item in result.selected] == ["b.jpg", "a.jpg"]
-    assert result.selected[1].possible_minor is True
 
 
 def test_media_picker_drops_near_duplicate_keeping_the_stronger(tmp_path):

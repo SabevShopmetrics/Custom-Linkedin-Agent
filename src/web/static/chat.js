@@ -1062,11 +1062,10 @@ function photoTile(p, hasPost) {
       onclick: (e) => { e.stopPropagation(); toggleInPost(p); },
     }));
   }
-  const flag = p.possible_minor ? 'дете на снимката?' : p.mismatch ? 'не пасва?' : null;
-  if (flag) {
+  if (p.mismatch) {
     tile.appendChild(h('span', {
-      class: 'flag', html: `⚠<span class="long"> ${esc(flag)}</span>`,
-      title: p.mismatch || 'Агентът смята, че може да има непълнолетни — нужно е съгласие на родител.',
+      class: 'flag', html: '⚠<span class="long"> не пасва?</span>',
+      title: p.mismatch,
     }));
   }
   return tile;

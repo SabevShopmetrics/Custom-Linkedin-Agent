@@ -6,7 +6,7 @@
 ВСИЧКИ влизат в поста (до таван MAX_POST_PHOTOS, колкото позволява LinkedIn). Media Picker вече
 не „избира най-добрите N", а:
   - подрежда ги (най-силната първа — тя се вижда най-голяма в лентата);
-  - маркира possible_minor / topical_mismatch, както досега;
+  - маркира topical_mismatch, както досега;
   - изключва САМО скрийншоти от компютър/телефон и почти еднакви дубликати, с причина.
 
 Скорост (2026-10-13, на живо, 8 снимки): едно извикване с всички снимки и „мислене" отнемаше
@@ -14,7 +14,9 @@
 ЕДНО малко извикване на снимка, паралелно (NO_THINKING_ROLES=media в .env) — ~5 s за 8 снимки,
 3 от 3 пускания × 23 снимки със същите решения като бавния вариант. Моделът само описва
 снимката; подредбата (по strength) и дубликатите (перцептивен хеш) са правила в кода.
-Снимка, чийто преглед се провали, ОСТАВА в поста с possible_minor=True — човек я вижда.
+Снимка, чийто преглед се провали, ОСТАВА в поста — човекът я е прикачил нарочно.
+Засичане на непълнолетни на снимките няма (махнато 2026-10-15 по решение на потребителя:
+съгласията се одобряват предварително, а засичането даваше фалшиви „Пост иска преглед").
 """
 
 from __future__ import annotations
@@ -54,10 +56,6 @@ SYSTEM_PROMPT_TEMPLATE = """\
 "strength" 1–5: колко силна е като ПЪРВА снимка на поста (тя се вижда най-голяма в лентата):
 хора в действие, ясно свързани с повода = 5; план или графика = 2–3; слаба или неясна = 1.
 
-ЗАДЪЛЖИТЕЛНО "possible_minor": true, ако снимката вероятно показва лице под 18 години
-(ученическа възраст, униформа на гимназист и т.н.). Това задейства задължителен човешки преглед
-преди публикуване — предпочитай да маркираш при съмнение, не да пропуснеш.
-
 "topical_mismatch": true само при реално съмнение, че снимката е обща/стокова, без връзка с
 конкретния повод от брифа; тогава кратка причина в "mismatch_reason". Снимката пак остава —
 човекът решава.
@@ -67,7 +65,6 @@ SYSTEM_PROMPT_TEMPLATE = """\
   "kind": "photo" | "graphic" | "screen_capture",
   "description": "какво показва, до 20 думи",
   "strength": 1-5,
-  "possible_minor": true/false,
   "topical_mismatch": true/false,
   "mismatch_reason": "кратко защо не пасва, само ако topical_mismatch е true, иначе null"
 }}
@@ -148,7 +145,6 @@ def _assemble(photos: list[Path], reviews: list[PhotoReviewSchema | None]) -> Me
                 MediaSelectionItem(
                     filename=photo.name,
                     reason="прикачена от вас — моделът не успя да я прегледа",
-                    possible_minor=True,  # непрегледана = човек трябва да я види
                 )
             )
         else:
@@ -156,7 +152,6 @@ def _assemble(photos: list[Path], reviews: list[PhotoReviewSchema | None]) -> Me
                 MediaSelectionItem(
                     filename=photo.name,
                     reason=review.description or "прикачена от вас",
-                    possible_minor=review.possible_minor,
                     topical_mismatch=review.topical_mismatch,
                     mismatch_reason=review.mismatch_reason if review.topical_mismatch else None,
                 )

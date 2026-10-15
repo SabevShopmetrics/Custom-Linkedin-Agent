@@ -92,6 +92,14 @@ def test_internal_notes_without_action_are_hidden_and_duplicates_removed():
     ]
 
 
+
+def test_old_minor_photo_warning_is_hidden():
+    """Засичането на непълнолетни е махнато (2026-10-15) — старите предупреждения в meta.json не се показват."""
+    old = ("Избрана снимка е маркирана от Media Picker като вероятно съдържаща непълнолетни лица — "
+           "прегледайте ръчно преди публикуване.")
+    assert humanize_note(old) is None
+    assert humanize_notes([old]) == []
+
 def test_unknown_note_passes_through_with_jargon_softened():
     assert humanize_note("Бележка за facts.yaml и Media Picker") == "Бележка за данните за клъстера и изборът на снимки"
 

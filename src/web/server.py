@@ -284,7 +284,6 @@ class WebApp:
                 **entry,
                 "in_post": entry["name"] in in_post,
                 "agent_reason": agent.get("reason"),
-                "possible_minor": bool(agent.get("possible_minor")),
                 "mismatch": agent.get("mismatch_reason") if agent.get("topical_mismatch") else None,
             })
 
@@ -1376,12 +1375,6 @@ class WebApp:
         web = _read_web(path)
         meta = _read_meta(path)
         has_text = bool(batches.final_text(path))
-        try:
-            media = read_json(path / "media.json").get("selected", [])
-        except (OSError, ValueError):
-            media = []
-        selected = set(uploads.selected_photos(path)) if has_text else set()
-        minors = sum(1 for m in media if m.get("possible_minor") and m.get("filename") in selected)
         job = self.job_for(item["id"])
         job_error = job.error if job and job.state == "error" else None
         overdue = False
@@ -1392,7 +1385,7 @@ class WebApp:
             except ValueError:
                 pass
         problems = flow.issues(
-            has_text=has_text, meta=meta, sched=item, minors=minors, job_error=job_error,
+            has_text=has_text, meta=meta, sched=item, job_error=job_error,
             source_changed=bool(web.get("source_changed")), published=item["published"],
             overdue=overdue, publish_mode=self.publish_settings().mode,
         )
